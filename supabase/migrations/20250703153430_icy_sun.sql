@@ -1,0 +1,71 @@
+-- Tabella per le richieste di registrazione
+CREATE TABLE IF NOT EXISTS registration_requests (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  company_name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  phone VARCHAR(50),
+  plan_type VARCHAR(20) NOT NULL CHECK (plan_type IN ('base', 'professional', 'enterprise')),
+  message TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  temp_password TEXT,
+  note TEXT
+);
+
+-- Indici per migliorare le performance
+CREATE INDEX IF NOT EXISTS idx_registration_created_at ON registration_requests(created_at);
+CREATE INDEX IF NOT EXISTS idx_registration_status ON registration_requests(status);
+
+-- Enable Row Level Security
+ALTER TABLE registration_requests ENABLE ROW LEVEL SECURITY;
+
+-- Policies
+-- Verifica se la policy esiste già prima di crearla
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies 
+    WHERE tablename = 'registration_requests' AND policyname = 'enable_public_insert'
+  ) THEN
+    -- Chiunque può inserire una richiesta di registrazione
+    EXECUTE 'CREATE POLICY "enable_public_insert" ON registration_requests
+      FOR INSERT TO public
+      WITH CHECK (true)';
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies 
+    WHERE tablename = 'registration_requests' AND policyname = 'enable_read_requests'
+  ) THEN
+    -- Chiunque può leggere le richieste
+    EXECUTE 'CREATE POLICY "enable_read_requests" ON registration_requests
+      FOR SELECT TO public
+      USING (true)';
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies 
+    WHERE tablename = 'registration_requests' AND policyname = 'enable_admin_update_requests'
+  ) THEN
+    -- Gli utenti autenticati possono aggiornare le richieste
+    EXECUTE 'CREATE POLICY "enable_admin_update_requests" ON registration_requests
+      FOR UPDATE TO authenticated
+      USING (true)
+      WITH CHECK (true)';
+  END IF;
+  
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies 
+    WHERE tablename = 'registration_requests' AND policyname = 'enable_admin_read'
+  ) THEN
+    -- Gli utenti autenticati possono leggere tutte le richieste
+    EXECUTE 'CREATE POLICY "enable_admin_read" ON registration_requests
+      FOR SELECT TO authenticated
+      USING (true)';
+  END IF;
+END
+$$;
+
+-- Aggiunta di un commento alla tabella registration_requests per documentare il suo scopo
+COMMENT ON TABLE registration_requests IS 'Tabella per gestire le richieste di registrazione degli utenti';

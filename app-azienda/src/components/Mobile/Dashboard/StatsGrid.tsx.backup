@@ -1,0 +1,83 @@
+import React from 'react';
+import { Building2, CheckCircle, Calendar, Gift, Utensils, FileText } from 'lucide-react';
+
+interface MonthlyStats {
+  turniOggi: number;
+  turniTotaliMese: number;
+  turniCompletati: number;
+  eventiOggi: number;
+  eventiTotaliMese: number;
+  eventiCompletati: number;
+  buoniPastoAssegnati: number;
+  pastiAziendaliUsufruiti: number;
+  noteSpeseInviate: number;
+}
+
+interface StatsGridProps {
+  monthlyStats: MonthlyStats;
+}
+
+const StatsGrid: React.FC<StatsGridProps> = ({ monthlyStats }) => {
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      {/* RIGA 1: TURNI */}
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <Building2 className="h-6 w-6 mx-auto mb-2 text-purple-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.turniOggi}</div>
+        <div className="text-xs text-gray-400">Turni Oggi</div>
+      </div>
+      
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <Building2 className="h-6 w-6 mx-auto mb-2 text-purple-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.turniTotaliMese}</div>
+        <div className="text-xs text-gray-400">Turni Mese</div>
+      </div>
+      
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <CheckCircle className="h-6 w-6 mx-auto mb-2 text-green-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.turniCompletati}</div>
+        <div className="text-xs text-gray-400">Turni Completati</div>
+      </div>
+      
+      {/* RIGA 2: EVENTI */}
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <Calendar className="h-6 w-6 mx-auto mb-2 text-blue-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.eventiOggi}</div>
+        <div className="text-xs text-gray-400">Eventi Oggi</div>
+      </div>
+      
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <Calendar className="h-6 w-6 mx-auto mb-2 text-blue-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.eventiTotaliMese}</div>
+        <div className="text-xs text-gray-400">Eventi Mese</div>
+      </div>
+      
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <CheckCircle className="h-6 w-6 mx-auto mb-2 text-green-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.eventiCompletati}</div>
+        <div className="text-xs text-gray-400">Eventi Completati</div>
+      </div>
+      
+      {/* RIGA 3: PASTI E SPESE */}
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <Gift className="h-6 w-6 mx-auto mb-2 text-yellow-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.buoniPastoAssegnati}</div>
+        <div className="text-xs text-gray-400">Buoni Pasto</div>
+      </div>
+      
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <Utensils className="h-6 w-6 mx-auto mb-2 text-orange-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.pastiAziendaliUsufruiti}</div>
+        <div className="text-xs text-gray-400">Pasti Azienda</div>
+      </div>
+      
+      <div className="bg-gray-800 rounded-xl p-3 border border-gray-700 text-center">
+        <FileText className="h-6 w-6 mx-auto mb-2 text-cyan-400" />
+        <div className="text-xl font-bold text-white">{monthlyStats.noteSpeseInviate}</div>
+        <div className="text-xs text-gray-400">Note Spese</div>
+      </div>
+    </div>
+  );
+};
+
+export default StatsGrid;

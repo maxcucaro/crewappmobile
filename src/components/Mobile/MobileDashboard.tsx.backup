@@ -1,0 +1,585 @@
+import React, { useState, useEffect } from 'react';
+import { Calendar, Clock, DollarSign, MapPin, CheckCircle, AlertTriangle, Building2, Users, Briefcase, Plane, Euro, Gift, Star, Utensils, FileText } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { CopyrightFooter } from '../UI/CopyrightFooter';
+import { supabase } from '../../lib/db';
+import DashboardHeader from './Dashboard/DashboardHeader';
+import StatsGrid from './Dashboard/StatsGrid';
+import UpcomingEvents from './Dashboard/UpcomingEvents';
+import MonthlySummary from './Dashboard/MonthlySummary';
+import QuickActions from './Dashboard/QuickActions';
+
+interface EventAssignment {
+  id: string;
+  evento_id: string;
+  nome_evento: string;
+  nome_azienda: string;
+  giorno_inizio_evento: string;
+  giorno_fine_evento: string;
+  evento_localita: string;
+  evento_indirizzo?: string;
+  evento_orario_convocazione?: string;
+  evento_descrizione?: string;
+  tariffa_evento_assegnata?: number;
+  bonus_previsti: number;
+  evento_trasferta: boolean;
+  bonus_trasferta: boolean;
+  bonus_diaria: boolean;
+  benefits_evento_ids: string[];
+  benefits_evento_nomi: string[];
+  benefits_disponibili: any;
+}
+
+interface EmployeeBenefit {
+  id: string;
+  nome_tariffa: string;
+  categoria: string;
+  tipo_calcolo: string;
+  importo: number;
+  attivo: boolean;
+}
+
+interface EventWithBenefits {
+  assignment: EventAssignment;
+  applicableBenefits: EmployeeBenefit[];
+  totalBenefitsAmount: number;
+  benefitDetails: {
+    name: string;
+    amount: number;
+    category: string;
+    applied: boolean;
+  }[];
+}
+
+interface MonthlyStats {
+  turniOggi: number;
+  turniTotaliMese: number;
+  turniCompletati: number;
+  eventiOggi: number;
+  eventiTotaliMese: number;
+  eventiCompletati: number;
+  buoniPastoAssegnati: number;
+  pastiAziendaliUsufruiti: number;
+  noteSpeseInviate: number;
+  totalBaseAmount: number;
+  totalBenefitsAmount: number;
+  warehouseEvents: number;
+  regularEvents: number;
+  travelEvents: number;
+}
+
+interface MobileDashboardProps {
+  onNavigate?: (tab: string) => void;
+}
+
+const MobileDashboard: React.FC<MobileDashboardProps> = ({ onNavigate }) => {
+  const { user } = useAuth();
+  const [eventsWithBenefits, setEventsWithBenefits] = useState<EventWithBenefits[]>([]);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [warehouseShifts, setWarehouseShifts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [monthlyStats, setMonthlyStats] = useState<MonthlyStats>({
+    turniOggi: 0,
+    turniTotaliMese: 0,
+    turniCompletati: 0,
+    eventiOggi: 0,
+    eventiTotaliMese: 0,
+    eventiCompletati: 0,
+    buoniPastoAssegnati: 0,
+    pastiAziendaliUsufruiti: 0,
+    noteSpeseInviate: 0,
+    totalBaseAmount: 0,
+    totalBenefitsAmount: 0,
+    warehouseEvents: 0,
+    regularEvents: 0,
+    travelEvents: 0
+  });
+
+  useEffect(() => {
+    if (user?.id) {
+      loadDashboardData();
+    }
+  }, [user?.id]);
+
+  const loadDashboardData = async () => {
+    try {
+      setLoading(true);
+      
+      console.log('🔍 Caricamento dashboard con sistema benefit per user:', user?.id);
+      
+      // 1. Carica profilo dipendente
+      const { data: userData, error: userError } = await supabase
+        .from('registration_requests')
+        .select(`
+          *,
+          regaziendasoftware!parent_company_id(
+            id,
+            ragione_sociale,
+            email,
+            telefono
+          )
+        `)
+        .eq('auth_user_id', user?.id)
+        .single();
+
+      if (userError || !userData) {
+        console.error('❌ Errore caricamento profilo:', userError);
+        return;
+      }
+
+      setUserProfile(userData);
+      console.log('✅ Profilo caricato:', userData.full_name);
+
+      // 2. Carica turni magazzino dalla tabella crew_assegnazione_turni
+      const today = new Date();
+      const currentMonth = today.getMonth();
+      const currentYear = today.getFullYear();
+      const todayString = today.toISOString().split('T')[0];
+      const startOfMonth = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0];
+      const endOfMonth = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0];
+
+      console.log('📅 Periodo analisi:', { startOfMonth, endOfMonth, todayString });
+
+      // Carica turni magazzino assegnati (SOLO DEL MESE CORRENTE)
+      const { data: turniData, error: turniError } = await supabase
+        .from('crew_assegnazione_turni')
+        .select('*')
+        .eq('dipendente_id', user?.id)
+        .gte('data_turno', startOfMonth)
+        .lte('data_turno', endOfMonth)
+        .order('data_turno', { ascending: true });
+
+      if (turniError) {
+        console.error('❌ Errore caricamento turni:', turniError);
+      }
+
+      console.log('🏭 Turni magazzino del mese corrente:', turniData?.length || 0);
+
+      // 3. Carica eventi assegnati al dipendente
+      const { data: assignmentsData, error: assignmentsError } = await supabase
+        .from('crew_event_assegnazione')
+        .select('*')
+        .eq('dipendente_freelance_id', user?.id)
+        .order('giorno_inizio_evento', { ascending: true });
+
+      if (assignmentsError) {
+        console.error('❌ Errore caricamento assegnazioni eventi:', assignmentsError);
+        setEventsWithBenefits([]);
+        return;
+      }
+
+      console.log('📅 Eventi assegnati trovati:', assignmentsData?.length || 0);
+
+      // 3.5. Carica turni magazzino assegnati al dipendente
+      const { data: warehouseShiftsData, error: warehouseShiftsError } = await supabase
+        .from('crew_assegnazione_turni')
+        .select(`
+          *,
+          crew_template_turni!turno_id(
+            warehouse_id,
+            warehouses!warehouse_id(
+              name,
+              address
+            )
+          )
+        `)
+        .eq('dipendente_id', user?.id)
+        .order('data_turno', { ascending: true });
+
+      if (warehouseShiftsError) {
+        console.error('❌ Errore caricamento turni magazzino:', warehouseShiftsError);
+        setWarehouseShifts([]);
+      } else {
+        console.log('🏭 Turni magazzino assegnati trovati:', warehouseShiftsData?.length || 0);
+        setWarehouseShifts(warehouseShiftsData || []);
+      }
+
+      // 4. Carica tariffe assegnate al dipendente
+      const { data: employeeRatesData, error: ratesError } = await supabase
+        .from('crew_assegnazionetariffa')
+        .select('*')
+        .eq('dipendente_id', user?.id)
+        .eq('attivo', true);
+
+      if (ratesError) {
+        console.error('❌ Errore caricamento tariffe dipendente:', ratesError);
+        return;
+      }
+
+      console.log('💰 Tariffe dipendente caricate:', employeeRatesData?.length || 0);
+
+      // 5. Raccogli tutti gli ID delle tariffe e caricale separatamente
+      const employeeBenefits: EmployeeBenefit[] = [];
+      
+      if (employeeRatesData && employeeRatesData.length > 0) {
+        // Raccogli tutti gli ID delle tariffe
+        const allTariffeIds: string[] = [];
+        employeeRatesData.forEach(assignment => {
+          if (assignment.tariffe_ids && assignment.tariffe_ids.length > 0) {
+            allTariffeIds.push(...assignment.tariffe_ids);
+          }
+        });
+
+        console.log('🔍 ID tariffe da caricare:', allTariffeIds);
+
+        // Carica le tariffe usando gli ID raccolti
+        if (allTariffeIds.length > 0) {
+          // Rimuovi duplicati
+          const uniqueTariffeIds = [...new Set(allTariffeIds)];
+          
+          const { data: tariffeData, error: tariffeError } = await supabase
+            .from('crew_tariffe')
+            .select('*')
+            .in('id', uniqueTariffeIds)
+            .eq('attivo', true);
+
+          if (tariffeError) {
+            console.error('❌ Errore caricamento dettagli tariffe:', tariffeError);
+            return;
+          }
+
+          console.log('✅ Tariffe caricate:', tariffeData?.length || 0);
+
+          // Popola employeeBenefits
+          tariffeData?.forEach(tariffa => {
+            employeeBenefits.push({
+              id: tariffa.id,
+              nome_tariffa: tariffa.nome_tariffa,
+              categoria: tariffa.categoria,
+              tipo_calcolo: tariffa.tipo_calcolo,
+              importo: tariffa.importo,
+              attivo: tariffa.attivo
+            });
+          });
+        }
+      }
+
+      console.log('🎁 Benefit dipendente disponibili:', employeeBenefits.map(b => b.nome_tariffa));
+
+      // 6. Per ogni evento, calcola i benefit applicabili
+      const eventsWithCalculatedBenefits: EventWithBenefits[] = [];
+
+      for (const assignment of assignmentsData || []) {
+        console.log(`\n🎭 ANALISI EVENTO: "${assignment.nome_evento}"`);
+        console.log('📋 Benefit evento disponibili:', {
+          benefits_evento_nomi: assignment.benefits_evento_nomi,
+          bonus_trasferta: assignment.bonus_trasferta,
+          bonus_diaria: assignment.bonus_diaria,
+          evento_trasferta: assignment.evento_trasferta,
+          bonus_previsti: assignment.bonus_previsti
+        });
+
+        // Calcola benefit applicabili per questo evento
+        const applicableBenefits: EmployeeBenefit[] = [];
+        const benefitDetails: { name: string; amount: number; category: string; applied: boolean }[] = [];
+        let totalBenefitsAmount = 0;
+
+        // A. Controlla benefit da benefits_evento_nomi
+        if (assignment.benefits_evento_nomi && assignment.benefits_evento_nomi.length > 0) {
+          assignment.benefits_evento_nomi.forEach((benefitName: string) => {
+            const matchingBenefit = employeeBenefits.find(b => 
+              b.nome_tariffa.toLowerCase().includes(benefitName.toLowerCase()) ||
+              benefitName.toLowerCase().includes(b.nome_tariffa.toLowerCase())
+            );
+
+            if (matchingBenefit) {
+              applicableBenefits.push(matchingBenefit);
+              totalBenefitsAmount += matchingBenefit.importo;
+              benefitDetails.push({
+                name: matchingBenefit.nome_tariffa,
+                amount: matchingBenefit.importo,
+                category: matchingBenefit.categoria,
+                applied: true
+              });
+              console.log(`✅ BENEFIT APPLICATO: ${matchingBenefit.nome_tariffa} = €${matchingBenefit.importo}`);
+            } else {
+              benefitDetails.push({
+                name: benefitName,
+                amount: 0,
+                category: 'non_disponibile',
+                applied: false
+              });
+              console.log(`❌ BENEFIT NON DISPONIBILE: ${benefitName} (dipendente non ha questa tariffa)`);
+            }
+          });
+        }
+
+        // B. Controlla bonus specifici dell'evento
+        if (assignment.bonus_trasferta && assignment.evento_trasferta) {
+          const trasfertaBenefit = employeeBenefits.find(b => 
+            b.categoria === 'indennita_trasferta' || 
+            b.nome_tariffa.toLowerCase().includes('trasferta')
+          );
+          
+          if (trasfertaBenefit && !applicableBenefits.find(b => b.id === trasfertaBenefit.id)) {
+            applicableBenefits.push(trasfertaBenefit);
+            totalBenefitsAmount += trasfertaBenefit.importo;
+            benefitDetails.push({
+              name: trasfertaBenefit.nome_tariffa,
+              amount: trasfertaBenefit.importo,
+              category: trasfertaBenefit.categoria,
+              applied: true
+            });
+            console.log(`✅ BONUS TRASFERTA APPLICATO: ${trasfertaBenefit.nome_tariffa} = €${trasfertaBenefit.importo}`);
+          }
+        }
+
+        if (assignment.bonus_diaria) {
+          const diariaBenefit = employeeBenefits.find(b => 
+            b.nome_tariffa.toLowerCase().includes('diaria') ||
+            b.categoria === 'indennita_trasferta'
+          );
+          
+          if (diariaBenefit && !applicableBenefits.find(b => b.id === diariaBenefit.id)) {
+            applicableBenefits.push(diariaBenefit);
+            totalBenefitsAmount += diariaBenefit.importo;
+            benefitDetails.push({
+              name: diariaBenefit.nome_tariffa,
+              amount: diariaBenefit.importo,
+              category: diariaBenefit.categoria,
+              applied: true
+            });
+            console.log(`✅ BONUS DIARIA APPLICATO: ${diariaBenefit.nome_tariffa} = €${diariaBenefit.importo}`);
+          }
+        }
+
+        // C. Aggiungi bonus fissi previsti dall'evento
+        if (assignment.bonus_previsti && assignment.bonus_previsti > 0) {
+          totalBenefitsAmount += assignment.bonus_previsti;
+          benefitDetails.push({
+            name: 'Bonus Evento',
+            amount: assignment.bonus_previsti,
+            category: 'bonus_evento',
+            applied: true
+          });
+          console.log(`✅ BONUS FISSO EVENTO: €${assignment.bonus_previsti}`);
+        }
+
+        console.log(`💰 TOTALE BENEFIT APPLICABILI: €${totalBenefitsAmount}`);
+          // Per i turni magazzino, dovremmo caricare l'indirizzo dal database warehouses
+        warehouseShiftsData?.forEach(shift => {
+          // Estrai l'indirizzo dal JOIN con warehouses
+          shift.warehouse_address = shift.crew_template_turni?.warehouses?.address || 'Indirizzo non disponibile';
+        });
+          
+        console.log(`📊 DETTAGLIO BENEFIT:`, benefitDetails);
+
+        eventsWithCalculatedBenefits.push({
+          assignment,
+          applicableBenefits,
+          totalBenefitsAmount,
+          benefitDetails
+        });
+      }
+
+      setEventsWithBenefits(eventsWithCalculatedBenefits);
+      await calculateStatsFromDatabase(eventsWithCalculatedBenefits, turniData || [], warehouseShiftsData || []);
+
+    } catch (error) {
+      console.error('❌ Errore generale caricamento dashboard:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const calculateStatsFromDatabase = async (events: EventWithBenefits[], turniMagazzino: any[], warehouseShifts: any[]) => {
+    const today = new Date();
+    const currentMonth = today.getMonth();
+    const currentYear = today.getFullYear();
+    const todayString = today.toISOString().split('T')[0];
+    const startOfMonth = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0];
+    const endOfMonth = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0];
+
+    // Calcola turni oggi dalla tabella crew_assegnazione_turni
+    const turniOggi = turniMagazzino.filter(turno => 
+      turno.data_turno === todayString
+    ).length;
+
+    // Calcola eventi oggi
+    const eventiOggi = events.filter(e => {
+      return e.assignment.giorno_inizio_evento === todayString &&
+             !e.assignment.nome_evento.toLowerCase().includes('magazzino') &&
+             !e.assignment.nome_evento.toLowerCase().includes('turno');
+    }).length;
+
+    // Calcola turni totali del mese dalla tabella crew_assegnazione_turni
+    // I turni sono già filtrati per il mese corrente dalla query
+    const turniTotaliMese = turniMagazzino.length;
+
+    // Calcola eventi totali del mese
+    const eventiTotaliMese = events.filter(e => {
+      const eventDate = new Date(e.assignment.giorno_inizio_evento);
+      return eventDate.getMonth() === currentMonth && 
+             eventDate.getFullYear() === currentYear &&
+             !e.assignment.nome_evento.toLowerCase().includes('magazzino') &&
+             !e.assignment.nome_evento.toLowerCase().includes('turno');
+    }).length;
+
+    // Carica timesheet_entries per verificare eventi realmente completati
+    const { data: timesheetData } = await supabase
+      .from('timesheet_entries')
+      .select('event_id, end_time, status, is_rectified')
+      .eq('crew_id', user?.id)
+      .gte('date', startOfMonth)
+      .lte('date', endOfMonth);
+
+    // Crea un Set di event_id completati (con check-out o rettificati)
+    const completedEventIds = new Set(
+      timesheetData
+        ?.filter(t => t.end_time && (t.status === 'completed' || t.status === 'submitted'))
+        .map(t => t.event_id) || []
+    );
+
+    // Calcola eventi completati: conta solo eventi con check-out o rettificati
+    const eventiCompletati = events.filter(e => {
+      const eventDate = new Date(e.assignment.giorno_inizio_evento);
+      return eventDate.getMonth() === currentMonth &&
+             eventDate.getFullYear() === currentYear &&
+             !e.assignment.nome_evento.toLowerCase().includes('magazzino') &&
+             !e.assignment.nome_evento.toLowerCase().includes('turno') &&
+             completedEventIds.has(e.assignment.evento_id);
+    }).length;
+
+    // Carica dati reali dal database warehouse_checkins
+    let buoniPastoAssegnati = 0;
+    let pastiAziendaliUsufruiti = 0;
+    let turniCompletatiCount = 0;
+    let noteSpeseInviate = 0;
+
+    try {
+      // Carica turni completati: conta turni con check-out completato
+      const { data: checkinsData, error: checkinsError } = await supabase
+        .from('warehouse_checkins')
+        .select('date, meal_voucher, company_meal')
+        .eq('crew_id', user?.id)
+        .gte('date', startOfMonth)
+        .lte('date', endOfMonth)
+        .not('check_out_time', 'is', null);
+
+      if (!checkinsError && checkinsData) {
+        // Conta turni completati: conta giorni unici con checkout
+        const uniqueDates = new Set(checkinsData.map(t => t.date));
+        turniCompletatiCount = uniqueDates.size;
+
+        // Conta buoni pasto: 1 per giorno (prendi solo il primo check-in valido per giorno)
+        // Raggruppa per data e verifica se quel giorno ha buono pasto
+        const daysWithMealVoucher = new Set(
+          checkinsData
+            .filter(t => t.meal_voucher === true)
+            .map(t => t.date)
+        );
+        buoniPastoAssegnati = daysWithMealVoucher.size;
+
+        // Conta pasti aziendali: 1 per giorno (prendi solo il primo check-in valido per giorno)
+        const daysWithCompanyMeal = new Set(
+          checkinsData
+            .filter(t => t.company_meal === true)
+            .map(t => t.date)
+        );
+        pastiAziendaliUsufruiti = daysWithCompanyMeal.size;
+      }
+
+      // Conta note spese inviate nel mese
+      const { data: speseData, error: speseError } = await supabase
+        .from('spese')
+        .select('id')
+        .eq('id_tecnico', user?.id)
+        .gte('data_spesa', startOfMonth)
+        .lte('data_spesa', endOfMonth);
+
+      if (!speseError && speseData) {
+        noteSpeseInviate = speseData.length;
+      }
+    } catch (error) {
+      console.error('❌ Errore caricamento dati dal database:', error);
+    }
+
+    // Calcola totali economici del mese
+    const monthlyEvents = events.filter(e => {
+      const eventDate = new Date(e.assignment.giorno_inizio_evento);
+      return eventDate.getMonth() === currentMonth && 
+             eventDate.getFullYear() === currentYear;
+    });
+
+    const totalBaseAmount = monthlyEvents.reduce((sum, e) => 
+      sum + (e.assignment.tariffa_evento_assegnata || 0), 0);
+    
+    const totalBenefitsAmount = monthlyEvents.reduce((sum, e) => 
+      sum + e.totalBenefitsAmount, 0);
+
+    // Calcola tipologie eventi del mese
+    const warehouseEvents = monthlyEvents.filter(e => 
+      e.assignment.nome_evento.toLowerCase().includes('magazzino') ||
+      e.assignment.nome_evento.toLowerCase().includes('turno')
+    ).length;
+
+    const travelEvents = monthlyEvents.filter(e => 
+      e.assignment.evento_trasferta
+    ).length;
+
+    const regularEvents = monthlyEvents.length - warehouseEvents - travelEvents;
+    
+    console.log('📊 STATISTICHE CALCOLATE:', {
+      turniOggi,
+      turniTotaliMese,
+      turniCompletati: turniCompletatiCount,
+      eventiOggi,
+      eventiTotaliMese,
+      eventiCompletati,
+      buoniPastoAssegnati,
+      pastiAziendaliUsufruiti,
+      noteSpeseInviate
+    });
+    
+    setMonthlyStats({
+      turniOggi,
+      turniTotaliMese,
+      turniCompletati: turniCompletatiCount,
+      eventiOggi,
+      eventiTotaliMese,
+      eventiCompletati,
+      buoniPastoAssegnati,
+      pastiAziendaliUsufruiti,
+      noteSpeseInviate,
+      totalBaseAmount,
+      totalBenefitsAmount,
+      warehouseEvents,
+      regularEvents,
+      travelEvents
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-center text-white">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+          <p className="text-lg">Caricamento dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white">
+      <div className="p-4 pb-20 space-y-6">
+        <DashboardHeader userProfile={userProfile} />
+        
+        <StatsGrid monthlyStats={monthlyStats} />
+
+        <UpcomingEvents 
+          eventsWithBenefits={eventsWithBenefits} 
+          warehouseShifts={warehouseShifts}
+        />
+
+
+        <QuickActions onNavigate={onNavigate} />
+
+        {/* Copyright */}
+        <CopyrightFooter />
+      </div>
+    </div>
+  );
+};
+
+export default MobileDashboard;

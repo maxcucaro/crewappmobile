@@ -1,0 +1,29 @@
+{
+  "version": "1.8.4",
+  "buildTimestamp": "2025-12-27T14:30:00.000Z",
+  "features": [
+    "Check-in QR Code e GPS",
+    "Timesheet automatico",
+    "Note spese con foto",
+    "Modalità offline",
+    "Sincronizzazione automatica",
+    "Permessi nativi del browser",
+    "Installazione PWA ottimizzata",
+    "Notifiche push native",
+    "Sistema semplificato senza controlli artificiali",
+    "PWA completa con service worker",
+    "Funzionamento offline garantito",
+    "Installazione guidata multi-piattaforma",
+    "Visualizzazione tutti i turni futuri",
+    "Badge data intelligenti (OGGI, DOMANI, data)",
+    "Supporto multipli turni stesso giorno",
+    "Check-in separati per ogni turno",
+    "Stati turno: da fare, in corso, completato",
+    "Gestione simultanea turni eventi e magazzino",
+    "Toast professionali per notifiche",
+    "Logout ottimizzato con feedback visivo",
+    "Visualizzazione benefit eventi nel report mensile",
+    "App Azienda: gestione completa ferie, permessi, malattia e infortunio"
+  ],
+  "releaseNotes": "Versione 1.8.4 - APP AZIENDA: Aggiunta gestione completa ferie, permessi, malattia e infortunio con possibilità di inserimento, modifica ed eliminazione richieste. Fix sistema toast e validazione sovrapposizione date."
+}

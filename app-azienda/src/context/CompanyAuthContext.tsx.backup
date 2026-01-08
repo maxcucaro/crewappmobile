@@ -1,0 +1,126 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { User } from '@supabase/supabase-js';
+import { supabase } from '../utils/supabase';
+
+interface CompanyProfile {
+  id: string;
+  auth_user_id: string;
+  ragione_sociale: string;
+  partita_iva: string;
+  email: string;
+  telefono: string | null;
+  indirizzo: string | null;
+  citta: string | null;
+  cap: string | null;
+  created_at: string;
+}
+
+interface CompanyAuthContextType {
+  user: User | null;
+  companyProfile: CompanyProfile | null;
+  loading: boolean;
+  signIn: (email: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
+}
+
+const CompanyAuthContext = createContext<CompanyAuthContextType | undefined>(undefined);
+
+export const CompanyAuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [companyProfile, setCompanyProfile] = useState<CompanyProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadCompanyProfile(session.user.id);
+      } else {
+        setLoading(false);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadCompanyProfile(session.user.id);
+      } else {
+        setCompanyProfile(null);
+        setLoading(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const loadCompanyProfile = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('regaziendasoftware')
+        .select('*')
+        .eq('auth_user_id', userId)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (data) {
+        setCompanyProfile(data);
+      } else {
+        await supabase.auth.signOut();
+        throw new Error('Accesso non autorizzato. Solo aziende possono accedere.');
+      }
+    } catch (error) {
+      console.error('Error loading company profile:', error);
+      setCompanyProfile(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const signIn = async (email: string, password: string) => {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+
+    if (data.user) {
+      const { data: profile, error: profileError } = await supabase
+        .from('regaziendasoftware')
+        .select('*')
+        .eq('auth_user_id', data.user.id)
+        .maybeSingle();
+
+      if (profileError) throw profileError;
+
+      if (!profile) {
+        await supabase.auth.signOut();
+        throw new Error('Accesso non autorizzato. Solo aziende possono accedere.');
+      }
+    }
+  };
+
+  const signOut = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      setCompanyProfile(null);
+    } catch (error: any) {
+      console.error('Errore durante il logout:', error);
+      setCompanyProfile(null);
+      setUser(null);
+      throw error;
+    }
+  };
+
+  return (
+    <CompanyAuthContext.Provider value={{ user, companyProfile, loading, signIn, signOut }}>
+      {children}
+    </CompanyAuthContext.Provider>
+  );
+};
+
+export const useCompanyAuth = () => {
+  const context = useContext(CompanyAuthContext);
+  if (context === undefined) {
+    throw new Error('useCompanyAuth must be used within a CompanyAuthProvider');
+  }
+  return context;
+};

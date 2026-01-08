@@ -1,0 +1,304 @@
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { signOut, getCurrentUser, supabase } from '../lib/db';
+
+// Chiavi per localStorage
+const AUTH_STORAGE_KEY = 'crewmanager_auth_user';
+const AUTH_TIMESTAMP_KEY = 'crewmanager_auth_timestamp';
+const AUTH_EXPIRY_HOURS = 24; // Sessione valida per 24 ore
+
+interface User {
+  id: string;
+  email: string;
+  role: string;
+  displayName?: string;
+  isFirstAccess?: boolean;
+  subscriptionStatus?: {
+    isExpired: boolean;
+    isBlocked: boolean;
+    isLimited: boolean;
+    daysOverdue: number;
+    expiryDate?: string;
+    planType?: string;
+  };
+}
+
+interface AuthContextType {
+  user: User | null;
+  loading: boolean;
+  isFirstAccess: boolean;
+  login: (email: string, password: string, userType?: 'company' | 'crew') => Promise<void>;
+  logout: () => Promise<void>;
+  updatePassword: (newPassword: string) => Promise<boolean>;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [isFirstAccess, setIsFirstAccess] = useState(false);
+
+  useEffect(() => {
+    initializeAuth();
+  }, []);
+
+  const initializeAuth = async () => {
+    try {
+      // Prima controlla se c'è una sessione salvata nel localStorage
+      const savedUser = loadUserFromStorage();
+      if (savedUser) {
+        console.log('🔄 Ripristino sessione salvata per:', savedUser.email);
+        setUser(savedUser);
+        setIsFirstAccess(savedUser.isFirstAccess || false);
+        setLoading(false);
+        return;
+      }
+      
+      // Se non c'è sessione salvata, controlla Supabase
+      await checkUser();
+    } catch (error) {
+      console.error('Errore nell\'inizializzazione auth:', error);
+      setLoading(false);
+    }
+  };
+
+  const saveUserToStorage = (userData: User) => {
+    try {
+      const authData = {
+        user: userData,
+        timestamp: new Date().getTime()
+      };
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authData));
+      localStorage.setItem(AUTH_TIMESTAMP_KEY, authData.timestamp.toString());
+      console.log('💾 Sessione salvata nel localStorage per:', userData.email);
+    } catch (error) {
+      console.error('Errore nel salvataggio sessione:', error);
+    }
+  };
+
+  const loadUserFromStorage = (): User | null => {
+    try {
+      const savedData = localStorage.getItem(AUTH_STORAGE_KEY);
+      const savedTimestamp = localStorage.getItem(AUTH_TIMESTAMP_KEY);
+      
+      if (!savedData || !savedTimestamp) {
+        return null;
+      }
+      
+      const timestamp = parseInt(savedTimestamp);
+      const now = new Date().getTime();
+      const hoursElapsed = (now - timestamp) / (1000 * 60 * 60);
+      
+      // Controlla se la sessione è scaduta
+      if (hoursElapsed > AUTH_EXPIRY_HOURS) {
+        console.log('⏰ Sessione scaduta, rimuovo dal localStorage');
+        clearUserFromStorage();
+        return null;
+      }
+      
+      const authData = JSON.parse(savedData);
+      console.log('📱 Sessione caricata dal localStorage:', authData.user.email);
+      return authData.user;
+      
+    } catch (error) {
+      console.error('Errore nel caricamento sessione:', error);
+      clearUserFromStorage();
+      return null;
+    }
+  };
+
+  const clearUserFromStorage = () => {
+    try {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+      localStorage.removeItem(AUTH_TIMESTAMP_KEY);
+      console.log('🗑️ Sessione rimossa dal localStorage');
+    } catch (error) {
+      console.error('Errore nella rimozione sessione:', error);
+    }
+  };
+
+  const checkUser = async () => {
+    try {
+      const currentUser = await getCurrentUser();
+      if (currentUser) {
+        console.log('🔍 Controllo utente corrente:', currentUser.id, currentUser.email);
+        
+        // Controlla se è un crew in registration_requests usando l'ID di Supabase Auth
+        const { data: userData, error: userError } = await supabase
+          .from('registration_requests')
+          .select('*')
+          .eq('auth_user_id', currentUser.id)
+          .maybeSingle();
+        
+        if (!userError && userData) {
+          console.log('✅ Trovato come crew:', userData.full_name || userData.company_name);
+          
+          const firstAccess = userData.primo_accesso || false;
+          setIsFirstAccess(firstAccess);
+          
+          const userDataMapped = {
+            id: currentUser.id, // Usa l'ID di Supabase Auth
+            email: userData.email,
+            role: 'crew',
+            displayName: userData.full_name || userData.company_name || userData.email,
+            isFirstAccess: firstAccess
+          };
+          
+          setUser(userDataMapped);
+          saveUserToStorage(userDataMapped);
+          setLoading(false);
+          return;
+        }
+        
+        console.log('❌ Crew member non trovato');
+        // Se non trovato da nessuna parte, imposta utente null
+        setUser(null);
+      }
+    } catch (error) {
+      console.error('Error checking user:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const login = async (email: string, password: string, userType: 'company' | 'crew' = 'company') => {
+    try {
+      // 1. Login con Supabase Auth (dove esistono TUTTI gli utenti)
+      console.log('🔑 Tentativo login con Supabase Auth per:', email, 'Password length:', password.length);
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (authError) {
+        console.error('❌ Errore autenticazione Supabase:', authError.message, 'Code:', authError.status);
+        throw new Error('Email o password non corretti');
+      }
+      
+      const currentUser = authData.user;
+      if (!currentUser) {
+        throw new Error('Dati utente non validi');
+      }
+
+      console.log('✅ Login Supabase riuscito per:', currentUser.email);
+      
+      // 2. Cerca dati aggiuntivi in registration_requests usando auth_user_id
+      const { data: userData, error: userError } = await supabase
+        .from('registration_requests')
+        .select('*')
+        .eq('auth_user_id', currentUser.id)
+        .maybeSingle();
+
+      // 3. Se non trovato in registration_requests, usa dati base da auth
+      let displayName = currentUser.email;
+      let firstAccess = false;
+      
+      if (!userError && userData) {
+        console.log('✅ Utente collegato trovato in registration_requests');
+        displayName = userData.full_name || userData.company_name || currentUser.email;
+        firstAccess = userData.primo_accesso || false;
+      } else {
+        console.log('⚠️ Utente orfano - esiste solo in auth.users, uso dati base');
+        // Per utenti orfani, non è primo accesso
+        firstAccess = false;
+      }
+
+      setIsFirstAccess(firstAccess);
+      
+      const userDataMapped = {
+        id: currentUser.id,
+        email: currentUser.email || email,
+        role: 'crew',
+        displayName: displayName,
+        isFirstAccess: firstAccess
+      };
+      
+      setUser(userDataMapped);
+      saveUserToStorage(userDataMapped);
+      
+    } catch (error) {
+      console.error('Login error:', error);
+      throw error;
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await signOut();
+      clearUserFromStorage();
+      setUser(null);
+      setIsFirstAccess(false);
+    } catch (error) {
+      console.error('Logout error:', error);
+      clearUserFromStorage();
+      setUser(null);
+      setIsFirstAccess(false);
+      throw error;
+    }
+  };
+
+  const updatePassword = async (newPassword: string): Promise<boolean> => {
+    try {
+      // 1. PRIMA aggiorna la password in Supabase Auth (questo è critico!)
+      const { error: authError } = await supabase.auth.updateUser({
+        password: newPassword
+      });
+      
+      if (authError) {
+        console.error('Errore aggiornamento password Supabase Auth:', authError);
+        throw authError;
+      }
+      
+      console.log('✅ Password aggiornata in Supabase Auth');
+      
+      // 2. POI aggiorna la tabella registration_requests per sincronizzazione
+      if (user) {
+        const { error: updateError } = await supabase
+          .from('registration_requests')
+          .update({
+            primo_accesso: false,
+            password_definitiva: newPassword,
+            temp_password: null, // Rimuovi password temporanea
+            updated_at: new Date().toISOString()
+          })
+          .eq('auth_user_id', user.id); // Usa auth_user_id per il collegamento corretto
+
+        if (updateError) throw updateError;
+        
+        console.log('✅ Password sincronizzata in registration_requests');
+        
+        setIsFirstAccess(false);
+        const updatedUser = { ...user, isFirstAccess: false };
+        setUser(updatedUser);
+        saveUserToStorage(updatedUser);
+      }
+      return true;
+    } catch (error) {
+      console.error('Password update error:', error);
+      return false;
+    }
+  };
+
+  const value = {
+    user,
+    loading,
+    isFirstAccess,
+    login,
+    logout,
+    updatePassword
+  };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};

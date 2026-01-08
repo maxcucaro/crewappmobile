@@ -1,0 +1,470 @@
+import React, { useState, useEffect } from 'react';
+import { Clock, Edit, Save, X, AlertCircle, Coffee } from 'lucide-react';
+import { supabase } from '../../../lib/db';
+import { useAuth } from '../../../context/AuthContext';
+
+interface CompletedShift {
+  id: string;
+  turno_id: string;
+  giorno_turno: string;
+  nome_turno: string;
+  check_in_turno: string;
+  check_out_turno: string;
+  conteggio_ore: number;
+  buoni_pasto_assegnato: boolean;
+  pasto_aziendale_usufruito: boolean;
+  ore_straordinario?: number;
+  ore_previste?: number;
+  pausa_pranzo?: boolean;
+}
+
+interface ShiftActionsProps {
+  shift: CompletedShift;
+  onUpdate: () => void;
+}
+
+// Funzione per estrarre l'orario da un timestamp
+const extractTime = (timestamp: string | null): string => {
+  if (!timestamp) return '';
+
+  // Se è già in formato HH:MM
+  if (/^\d{2}:\d{2}$/.test(timestamp)) {
+    return timestamp;
+  }
+
+  // Se è in formato HH:MM:SS
+  if (/^\d{2}:\d{2}:\d{2}$/.test(timestamp)) {
+    return timestamp.substring(0, 5);
+  }
+
+  // Se è un timestamp ISO
+  try {
+    const date = new Date(timestamp);
+    if (!isNaN(date.getTime())) {
+      return date.toLocaleTimeString('it-IT', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+    }
+  } catch (e) {
+    console.error('Errore parsing timestamp:', e);
+  }
+
+  return '';
+};
+
+const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
+  const { user } = useAuth();
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedCheckIn, setEditedCheckIn] = useState('');
+  const [editedCheckOut, setEditedCheckOut] = useState('');
+  const [breakStart, setBreakStart] = useState('');
+  const [breakEnd, setBreakEnd] = useState('');
+  const [rectificationNote, setRectificationNote] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showOvertimeWarning, setShowOvertimeWarning] = useState(false);
+  const [requestOvertime, setRequestOvertime] = useState(false);
+  const [hasOvertimeInContract, setHasOvertimeInContract] = useState(true);
+
+  const calculateHours = (checkIn: string, checkOut: string, pausaInizio?: string, pausaFine?: string): number => {
+    if (!checkIn || !checkOut) return 0;
+
+    const [inH, inM] = checkIn.split(':').map(Number);
+    const [outH, outM] = checkOut.split(':').map(Number);
+    const inMinutes = inH * 60 + inM;
+    const outMinutes = outH * 60 + outM;
+    let hours = (outMinutes - inMinutes) / 60;
+
+    // Sottrai la durata della pausa se specificata
+    if (pausaInizio && pausaFine) {
+      const [pausaInH, pausaInM] = pausaInizio.split(':').map(Number);
+      const [pausaFinH, pausaFinM] = pausaFine.split(':').map(Number);
+      const pausaInMinutes = pausaInH * 60 + pausaInM;
+      const pausaFinMinutes = pausaFinH * 60 + pausaFinM;
+      const pausaDuration = (pausaFinMinutes - pausaInMinutes) / 60;
+
+      if (pausaDuration > 0) {
+        hours -= pausaDuration;
+      }
+    }
+
+    return hours;
+  };
+
+  // Carica i dati del turno (inclusi quelli rettificati se esistono)
+  useEffect(() => {
+    const loadShiftData = async () => {
+      try {
+        const { data: shiftData, error } = await supabase
+          .from('warehouse_checkins')
+          .select('*')
+          .eq('id', shift.id)
+          .maybeSingle();
+
+        if (error) throw error;
+
+        if (shiftData) {
+          // Usa i dati rettificati se esistono, altrimenti usa quelli originali
+          const checkInTime = shiftData.rectified_check_in_time || shiftData.check_in_time;
+          const checkOutTime = shiftData.rectified_check_out_time || shiftData.check_out_time;
+          const breakStartTime = shiftData.rectified_break_start || shiftData.break_start;
+          const breakEndTime = shiftData.rectified_break_end || shiftData.break_end;
+
+          setEditedCheckIn(extractTime(checkInTime));
+          setEditedCheckOut(extractTime(checkOutTime));
+          setBreakStart(breakStartTime || '');
+          setBreakEnd(breakEndTime || '');
+          setRectificationNote(shiftData.rectification_note || '');
+        }
+      } catch (err) {
+        console.error('Errore caricamento dati turno:', err);
+      }
+    };
+
+    if (isEditing && shift.id) {
+      loadShiftData();
+    }
+  }, [isEditing, shift.id]);
+
+  // Carica la configurazione del contratto per verificare se gli straordinari sono previsti
+  useEffect(() => {
+    const loadContractConfig = async () => {
+      try {
+        const { data: profile, error } = await supabase
+          .from('crew_members')
+          .select('overtime_eligible')
+          .eq('id', user?.id)
+          .maybeSingle();
+
+        if (error) throw error;
+        setHasOvertimeInContract(profile?.overtime_eligible ?? true);
+      } catch (err) {
+        console.error('Errore caricamento configurazione contratto:', err);
+        setHasOvertimeInContract(true); // Default a true per sicurezza
+      }
+    };
+
+    if (user?.id) {
+      loadContractConfig();
+    }
+  }, [user?.id]);
+
+  // Controlla se le ore superano il turno previsto
+  useEffect(() => {
+    if (editedCheckIn && editedCheckOut) {
+      const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd);
+      const expectedHours = shift.ore_previste || 8;
+
+      if (newHours > expectedHours) {
+        setShowOvertimeWarning(true);
+      } else {
+        setShowOvertimeWarning(false);
+        setRequestOvertime(false);
+      }
+    }
+  }, [editedCheckIn, editedCheckOut, breakStart, breakEnd, shift.ore_previste]);
+
+  const handleSave = async () => {
+    // Validazioni
+    if (!editedCheckIn || !editedCheckOut) {
+      setError('Inserisci orari validi');
+      return;
+    }
+
+    if (!rectificationNote || rectificationNote.trim().length < 10) {
+      setError('La nota di rettifica è obbligatoria (minimo 10 caratteri)');
+      return;
+    }
+
+    // Valida pausa pranzo se specificata
+    if ((breakStart && !breakEnd) || (!breakStart && breakEnd)) {
+      setError('Specifica sia l\'inizio che la fine della pausa pranzo');
+      return;
+    }
+
+    if (breakStart && breakEnd) {
+      const [pausaInH, pausaInM] = breakStart.split(':').map(Number);
+      const [pausaFinH, pausaFinM] = breakEnd.split(':').map(Number);
+      if ((pausaFinH * 60 + pausaFinM) <= (pausaInH * 60 + pausaInM)) {
+        setError('La fine della pausa deve essere dopo l\'inizio');
+        return;
+      }
+    }
+
+    const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd);
+    if (newHours <= 0) {
+      setError('L\'orario di uscita deve essere dopo l\'orario di entrata');
+      return;
+    }
+
+    setIsSaving(true);
+    setError(null);
+
+    try {
+      const rectificationDate = new Date().toISOString();
+
+      // Combina la data del turno con gli orari per creare timestamp completi
+      // Usa il formato con timezone per evitare problemi di conversione
+      const shiftDate = shift.giorno_turno; // formato: YYYY-MM-DD
+
+      // Crea date objects per check-in e check-out usando il timezone locale
+      const [checkInHour, checkInMin] = editedCheckIn.split(':').map(Number);
+      const [checkOutHour, checkOutMin] = editedCheckOut.split(':').map(Number);
+      const [year, month, day] = shiftDate.split('-').map(Number);
+
+      const checkInDate = new Date(year, month - 1, day, checkInHour, checkInMin, 0);
+      const checkOutDate = new Date(year, month - 1, day, checkOutHour, checkOutMin, 0);
+
+      const checkInTimestamp = checkInDate.toISOString();
+      const checkOutTimestamp = checkOutDate.toISOString();
+
+      const { error: updateError } = await supabase
+        .from('warehouse_checkins')
+        .update({
+          rectified_check_in_time: checkInTimestamp,
+          rectified_check_out_time: checkOutTimestamp,
+          rectified_break_start: breakStart ? breakStart : null,
+          rectified_break_end: breakEnd ? breakEnd : null,
+          rectified_pausa_pranzo: (breakStart && breakEnd) ? true : false,
+          rectified_total_hours: newHours,
+          rectification_note: rectificationNote.trim(),
+          rectified_by: user?.id,
+          rectified_at: rectificationDate,
+          overtime_requested: requestOvertime,
+          total_hours: newHours,
+          status: 'completed'
+        })
+        .eq('id', shift.id);
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      setIsEditing(false);
+      onUpdate();
+    } catch (err: any) {
+      console.error('❌ Errore aggiornamento turno:', err);
+      setError(err.message || 'Errore nel salvataggio delle modifiche');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setEditedCheckIn(shift.check_in_turno?.substring(0, 5) || '');
+    setEditedCheckOut(shift.check_out_turno?.substring(0, 5) || '');
+    setBreakStart('');
+    setBreakEnd('');
+    setRectificationNote('');
+    setRequestOvertime(false);
+    setShowOvertimeWarning(false);
+    setError(null);
+    setIsEditing(false);
+  };
+
+  if (!isEditing) {
+    return (
+      <button
+        onClick={() => setIsEditing(true)}
+        className="w-full mt-2 bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 flex items-center justify-center space-x-2"
+      >
+        <Edit className="h-4 w-4" />
+        <span>Rettifica Orari Turno</span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 bg-gray-800 border border-gray-600 rounded-lg p-4">
+      <h4 className="text-sm font-semibold text-white mb-3 flex items-center space-x-2">
+        <Edit className="h-4 w-4" />
+        <span>Rettifica Orari</span>
+      </h4>
+
+      {error && (
+        <div className="mb-3 bg-red-900 border border-red-700 rounded-lg p-2 flex items-start space-x-2">
+          <AlertCircle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
+          <span className="text-xs text-red-200">{error}</span>
+        </div>
+      )}
+
+      <div className="space-y-3 mb-3">
+        <div>
+          <label className="block text-xs font-medium text-gray-300 mb-1">
+            Orario Entrata
+          </label>
+          <input
+            type="time"
+            value={editedCheckIn}
+            onChange={(e) => setEditedCheckIn(e.target.value)}
+            className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-300 mb-1">
+            Orario Uscita
+          </label>
+          <input
+            type="time"
+            value={editedCheckOut}
+            onChange={(e) => setEditedCheckOut(e.target.value)}
+            className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+          />
+        </div>
+
+        <div className="border-t border-gray-600 pt-3 mt-3">
+          <label className="block text-xs font-medium text-gray-300 mb-2">
+            Pausa Pranzo:
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">
+                Inizio Pausa
+              </label>
+              <input
+                type="time"
+                value={breakStart}
+                onChange={(e) => setBreakStart(e.target.value)}
+                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">
+                Fine Pausa
+              </label>
+              <input
+                type="time"
+                value={breakEnd}
+                onChange={(e) => setBreakEnd(e.target.value)}
+                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-300 mb-1">
+            Nota Rettifica <span className="text-red-400">*</span>
+          </label>
+          <textarea
+            value={rectificationNote}
+            onChange={(e) => setRectificationNote(e.target.value)}
+            placeholder="Specifica il motivo della rettifica (obbligatorio, min 10 caratteri)..."
+            rows={3}
+            className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+          />
+          <div className="text-xs text-gray-400 mt-1">
+            {rectificationNote.length}/10 caratteri minimi
+          </div>
+        </div>
+
+        {editedCheckIn && editedCheckOut && (
+          <div className="space-y-2">
+            {showOvertimeWarning && hasOvertimeInContract && (
+              <div className="bg-orange-900 border border-orange-700 rounded p-3">
+                <div className="flex items-start space-x-2">
+                  <AlertCircle className="h-4 w-4 text-orange-400 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="text-xs font-semibold text-orange-200 mb-2">
+                      Le ore superano il turno previsto ({shift.ore_previste || 8}h)
+                    </div>
+                    <label className="flex items-center space-x-2 text-xs text-orange-300">
+                      <input
+                        type="checkbox"
+                        checked={requestOvertime}
+                        onChange={(e) => setRequestOvertime(e.target.checked)}
+                        className="rounded border-orange-600 bg-orange-800 text-orange-500 focus:ring-orange-500"
+                      />
+                      <span>Richiedi straordinari per le ore eccedenti</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-blue-900 border border-blue-700 rounded p-3">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="text-blue-200">Nuove ore totali:</span>
+                <span className="font-bold text-blue-100 text-lg">
+                  {calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd).toFixed(2)}h
+                </span>
+              </div>
+              {breakStart && breakEnd && (
+                <div className="text-xs text-blue-300 mt-1">
+                  (Include pausa: {breakStart} - {breakEnd})
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Pulsante Richiesta Straordinari - sempre visibile */}
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setRequestOvertime(!requestOvertime)}
+            disabled={!hasOvertimeInContract}
+            className={`w-full py-3 rounded-lg font-semibold transition-all ${
+              hasOvertimeInContract
+                ? requestOvertime
+                  ? 'bg-orange-600 text-white hover:bg-orange-700'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
+                : 'bg-gray-800 text-gray-500 border border-gray-700 cursor-not-allowed'
+            }`}
+          >
+            {hasOvertimeInContract ? (
+              requestOvertime ? (
+                <span className="flex items-center justify-center space-x-2">
+                  <AlertCircle className="h-4 w-4" />
+                  <span>Straordinari Richiesti</span>
+                </span>
+              ) : (
+                <span>Richiedi Straordinari</span>
+              )
+            ) : (
+              <span>Straordinari Non Previsti nel Contratto</span>
+            )}
+          </button>
+          {!hasOvertimeInContract && (
+            <p className="text-xs text-gray-500 mt-1 text-center">
+              Il tuo contratto non prevede il pagamento degli straordinari
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="flex space-x-2 mt-4">
+        <button
+          onClick={handleCancel}
+          disabled={isSaving}
+          className="flex-1 bg-gray-600 text-white py-2 rounded-lg hover:bg-gray-500 disabled:opacity-50 flex items-center justify-center space-x-1"
+        >
+          <X className="h-4 w-4" />
+          <span>Annulla</span>
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={isSaving}
+          className="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center justify-center space-x-1"
+        >
+          {isSaving ? (
+            <>
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+              <span>Salvataggio...</span>
+            </>
+          ) : (
+            <>
+              <Save className="h-4 w-4" />
+              <span>Salva</span>
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default ShiftActions;
