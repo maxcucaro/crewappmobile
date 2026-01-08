@@ -95,6 +95,14 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate, tableName 
     return hours;
   };
 
+  // Converte ore decimali in formato HH:MM
+  const formatHoursAsTime = (decimalHours: number): string => {
+    const totalMinutes = Math.round(decimalHours * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+  };
+
   // Determine if this is an extra shift
   const isExtraShift = tableName
     ? tableName === 'extra_shifts_checkins'
@@ -146,8 +154,8 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate, tableName 
             setShiftRow(shiftData);
             const checkInTime = shiftData.rectified_check_in_time || shiftData.check_in_time;
             const checkOutTime = shiftData.rectified_check_out_time || shiftData.check_out_time;
-            const breakStartTime = shiftData.rectified_break_start || shiftData.break_start_time || shiftData.break_start;
-            const breakEndTime = shiftData.rectified_break_end || shiftData.break_end_time || shiftData.break_end;
+            const breakStartTime = shiftData.rectified_pausa_pranzo_inizio || shiftData.pausa_pranzo_inizio || shiftData.break_start_time || shiftData.break_start;
+            const breakEndTime = shiftData.rectified_pausa_pranzo_fine || shiftData.pausa_pranzo_fine || shiftData.break_end_time || shiftData.break_end;
             const breakCenaStartTime = shiftData.rectified_pausa_cena_inizio || shiftData.pausa_cena_inizio;
             const breakCenaEndTime = shiftData.rectified_pausa_cena_fine || shiftData.pausa_cena_fine;
 
@@ -580,7 +588,7 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate, tableName 
               <div className="flex items-center justify-between text-xs mb-1">
                 <span className="text-blue-200">Nuove ore totali:</span>
                 <span className="font-bold text-blue-100 text-lg">
-                  {calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd).toFixed(2)}h
+                  {formatHoursAsTime(calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd))}
                 </span>
               </div>
               {(breakStart && breakEnd) || (breakCenaStart && breakCenaEnd) ? (

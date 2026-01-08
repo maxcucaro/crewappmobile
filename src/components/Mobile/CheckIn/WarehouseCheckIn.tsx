@@ -94,6 +94,7 @@ const WarehouseCheckIn: React.FC = () => {
   // Stati modal conferma check-out
   const [showCheckOutConfirmModal, setShowCheckOutConfirmModal] = useState(false);
   const [checkoutNotes, setCheckoutNotes] = useState('');
+  const [noteTurno, setNoteTurno] = useState('');
 
   // Stati modal forzatura pausa senza GPS
   const [showForceBreakModal, setShowForceBreakModal] = useState(false);
@@ -198,7 +199,7 @@ const WarehouseCheckIn: React.FC = () => {
     };
   }, [user?.id]);
 
-  // ✅ CORREZIONE: Carica stato pausa da pausa_cena_*
+  // ✅ CORREZIONE: Carica stato pausa da pausa_pranzo_*
   const loadBreakStatus = async () => {
     if (!currentSession || currentSession.type !== 'warehouse') {
       return;
@@ -207,21 +208,21 @@ const WarehouseCheckIn: React.FC = () => {
     try {
       const { data, error } = await supabase
         .from('warehouse_checkins')
-        .select('pausa_cena_inizio, pausa_cena_fine, pausa_cena_start_location, has_taken_break')
+        .select('pausa_pranzo_inizio, pausa_pranzo_fine, break_start_location, has_taken_break')
         .eq('id', currentSession.id)
         .maybeSingle();
 
       if (error || !data) return;
 
-      if (data.pausa_cena_inizio && ! data.pausa_cena_fine) {
+      if (data.pausa_pranzo_inizio && !data.pausa_pranzo_fine) {
         setBreakInProgress(true);
-        setBreakStartTime(data.pausa_cena_inizio);
+        setBreakStartTime(data.pausa_pranzo_inizio);
         setBreakEndTime(null);
-        setBreakStartLocation(data.pausa_cena_start_location);
-      } else if (data.pausa_cena_inizio && data.pausa_cena_fine) {
+        setBreakStartLocation(data.break_start_location);
+      } else if (data.pausa_pranzo_inizio && data.pausa_pranzo_fine) {
         setBreakInProgress(false);
-        setBreakStartTime(data.pausa_cena_inizio);
-        setBreakEndTime(data.pausa_cena_fine);
+        setBreakStartTime(data.pausa_pranzo_inizio);
+        setBreakEndTime(data.pausa_pranzo_fine);
       }
     } catch (error) {
       console.error('Errore caricamento stato pausa:', error);
@@ -682,10 +683,6 @@ const WarehouseCheckIn: React.FC = () => {
           aspectRatio: 1.0,
           formatsToSupport: [0],
           defaultZoomValueIfSupported: 2,
-          videoConstraints: {
-            facingMode: "environment",
-            advanced: [{ facingMode: "environment" }]
-          },
           experimentalFeatures: {
             useBarCodeDetectorIfSupported: true
           }
@@ -920,6 +917,8 @@ const WarehouseCheckIn: React.FC = () => {
 
           // Ricarica sessioni attive per mostrare il timer immediatamente
           await loadActiveSession();
+          // Carica subito lo stato pausa per mostrare i pulsanti
+          await loadBreakStatus();
         }
       } else {
         addOfflineData('checkin', checkInData);
@@ -1076,7 +1075,7 @@ const WarehouseCheckIn: React.FC = () => {
 
     try {
       const updateData: any = {
-        break_start_time: startTime,
+        pausa_pranzo_inizio: startTime,
         break_start_forced: forcedBreak
       };
 
@@ -1169,7 +1168,7 @@ const WarehouseCheckIn: React.FC = () => {
 
     try {
       const updateData: any = {
-        break_end_time: endTime,
+        pausa_pranzo_fine: endTime,
         has_taken_break: true,
         break_registered_late: false,
         break_end_forced: forcedBreak
@@ -1189,6 +1188,9 @@ const WarehouseCheckIn: React.FC = () => {
       if (forcedBreak && gpsErrorReason) {
         updateData.break_end_gps_error = gpsErrorReason;
       }
+
+      console.log('💾 Dati fine pausa da salvare:', JSON.stringify(updateData, null, 2));
+      console.log('🎯 Update su ID:', currentSession.id);
 
       const { error } = await supabase
         .from('warehouse_checkins')
@@ -1222,6 +1224,57 @@ const WarehouseCheckIn: React.FC = () => {
     const [h2, m2] = endTime.split(':').map(Number);
     return (h2 * 60 + m2) - (h1 * 60 + m1);
   };
+
+  // Salva note turno durante il turno attivo
+  const saveNoteTurno = async () => {
+    if (!currentSession || currentSession.type !== 'warehouse') return;
+
+    try {
+      const { error } = await supabase
+        .from('warehouse_checkins')
+        .update({ NoteTurno: noteTurno || null })
+        .eq('id', currentSession.id);
+
+      if (error) {
+        console.error('Errore salvataggio note:', error);
+        showError('Errore', 'Impossibile salvare le note');
+        return;
+      }
+
+      showSuccess('Note Salvate', 'Le tue note sono state salvate con successo', 2000);
+    } catch (error) {
+      console.error('Errore sistema salvataggio note:', error);
+      showError('Errore Sistema', 'Errore durante il salvataggio delle note');
+    }
+  };
+
+  // Carica note turno quando si carica la sessione
+  const loadNoteTurno = async () => {
+    if (!currentSession || currentSession.type !== 'warehouse') return;
+
+    try {
+      const { data, error } = await supabase
+        .from('warehouse_checkins')
+        .select('NoteTurno')
+        .eq('id', currentSession.id)
+        .maybeSingle();
+
+      if (error || !data) return;
+
+      setNoteTurno(data.NoteTurno || '');
+    } catch (error) {
+      console.error('Errore caricamento note:', error);
+    }
+  };
+
+  // Carica note quando cambia la sessione
+  useEffect(() => {
+    if (currentSession?.type === 'warehouse') {
+      loadNoteTurno();
+    } else {
+      setNoteTurno('');
+    }
+  }, [currentSession?.id]);
 
   // Calcola distanza tra due coordinate GPS (formula Haversine)
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
@@ -1389,8 +1442,8 @@ const WarehouseCheckIn: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Active Check-in Warning */}
-      {existingCheckIn && existingCheckIn.status === 'active' && (
+      {/* Active Check-in Warning - SOLO se c'è un check-in nel DB ma NON c'è una sessione locale attiva */}
+      {existingCheckIn && existingCheckIn.status === 'active' && !currentSession && (
         <div className="bg-orange-900 rounded-xl p-4 border border-orange-700">
           <div className="flex items-center space-x-3">
             <AlertCircle className="h-5 w-5 text-orange-400" />
@@ -1400,7 +1453,7 @@ const WarehouseCheckIn: React.FC = () => {
                 Check-in attivo dalle {existingCheckIn.check_in_time} - {existingCheckIn.nome_turno || 'Turno Magazzino'}
               </p>
               <p className="text-xs text-orange-300 mt-1">
-                Completa questo turno prima di iniziarne un altro
+                Caricamento sessione in corso...
               </p>
             </div>
           </div>
@@ -1408,7 +1461,7 @@ const WarehouseCheckIn: React.FC = () => {
       )}
 
       {/* Active Sessions Display - Multiple Sessions Support */}
-      {activeSessions.filter(s => s.type === 'warehouse').length > 0 && (
+      {(currentSession?.type === 'warehouse' || activeSessions.filter(s => s.type === 'warehouse').length > 0) && (
         <div className="bg-gradient-to-br from-purple-600 to-pink-600 rounded-2xl p-6 shadow-xl">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xl font-bold text-white">
@@ -1493,33 +1546,73 @@ const WarehouseCheckIn: React.FC = () => {
             )}
           </div>
 
+          {/* Note Turno - Sempre modificabili durante il turno */}
+          {currentSession && currentSession.type === 'warehouse' && (
+            <div className="bg-gradient-to-r from-blue-900 to-indigo-900 rounded-xl p-4 border border-blue-700 shadow-lg mt-4">
+              <div className="flex items-center space-x-2 mb-3">
+                <div className="bg-blue-600 p-2 rounded-lg">
+                  <svg className="h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </div>
+                <h5 className="text-white font-bold text-lg">📝 Note Turno</h5>
+              </div>
+              <textarea
+                value={noteTurno}
+                onChange={(e) => setNoteTurno(e.target.value)}
+                placeholder="Scrivi qui eventuali note, osservazioni o segnalazioni durante il turno..."
+                className="w-full bg-gray-800 bg-opacity-50 text-white border-2 border-blue-600 rounded-lg p-3 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400 min-h-[100px] placeholder-gray-400 transition-all"
+                maxLength={500}
+              />
+              <div className="flex items-center justify-between mt-2">
+                <p className="text-blue-200 text-xs">
+                  {noteTurno.length}/500 caratteri
+                </p>
+                <button
+                  onClick={saveNoteTurno}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 shadow-md"
+                >
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span>Salva Note</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Mantieni la gestione pausa solo se c'è una sessione warehouse attiva */}
           {currentSession && currentSession.type === 'warehouse' && currentSession.hasLunchBreak && (
             <div className="space-y-4 mt-4">
               {/* Break Management */}
-              <div className="bg-white bg-opacity-10 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h5 className="text-white font-medium flex items-center space-x-2">
-                    <Coffee className="h-5 w-5" />
-                    <span>Gestione Pausa Pranzo</span>
-                  </h5>
-                  <div className={`flex items-center space-x-1 px-2 py-1 rounded-full text-xs ${
-                    gpsLoading ? 'bg-yellow-600' : currentLocation ? 'bg-green-600' : 'bg-red-600'
+              <div className="bg-gradient-to-br from-orange-900/40 to-amber-900/40 backdrop-blur-sm rounded-xl p-5 shadow-2xl border border-orange-700/50">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center space-x-3">
+                    <div className="bg-gradient-to-br from-orange-500 to-amber-600 p-2.5 rounded-xl shadow-lg">
+                      <Coffee className="h-6 w-6 text-white" />
+                    </div>
+                    <div>
+                      <h5 className="text-white font-bold text-lg">Pausa Pranzo</h5>
+                      <p className="text-orange-200 text-xs">Gestisci la tua pausa</p>
+                    </div>
+                  </div>
+                  <div className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-full text-xs font-semibold shadow-md ${
+                    gpsLoading ? 'bg-yellow-500' : currentLocation ? 'bg-green-500' : 'bg-red-500'
                   }`}>
                     {gpsLoading ? (
                       <>
-                        <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></div>
-                        <span className="text-white">GPS...</span>
+                        <div className="animate-spin h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full"></div>
+                        <span className="text-white">Rilevamento...</span>
                       </>
                     ) : currentLocation ? (
                       <>
-                        <MapPin className="h-3 w-3 text-white" />
-                        <span className="text-white">GPS OK</span>
+                        <MapPin className="h-3.5 w-3.5 text-white animate-pulse" />
+                        <span className="text-white">GPS Attivo</span>
                       </>
                     ) : (
                       <>
-                        <MapPin className="h-3 w-3 text-white" />
-                        <span className="text-white">NO GPS</span>
+                        <MapPin className="h-3.5 w-3.5 text-white" />
+                        <span className="text-white">GPS Off</span>
                       </>
                     )}
                   </div>
@@ -1530,60 +1623,65 @@ const WarehouseCheckIn: React.FC = () => {
                     <button
                       onClick={() => handleStartBreak(false)}
                       disabled={gpsLoading}
-                      className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white py-3 px-4 rounded-lg font-medium flex items-center justify-center space-x-2 transition-colors"
+                      className="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white py-4 px-5 rounded-xl font-bold text-base flex items-center justify-center space-x-2.5 transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
                     >
-                      <Coffee className="h-5 w-5" />
+                      <Coffee className="h-6 w-6" />
                       <span>
-                        {gpsLoading ? 'Verifica GPS...' : currentLocation ? '☕ INIZIA PAUSA' : '☕ INIZIA PAUSA (GPS richiesto)'}
+                        {gpsLoading ? 'Verifica GPS in corso...' : currentLocation ? '☕ INIZIA PAUSA PRANZO' : '☕ INIZIA PAUSA (Richiedi GPS)'}
                       </span>
                     </button>
                     {!currentLocation && !gpsLoading && (
-                      <div className="mt-2 bg-yellow-900/30 border border-yellow-600 rounded-lg p-3">
-                        <p className="text-yellow-200 text-xs text-center">
-                          ⚠️ GPS non disponibile. Cliccando il pulsante sopra verrai chiesto di attivare il GPS o di forzare la pausa.
+                      <div className="mt-3 bg-gradient-to-r from-yellow-900/50 to-amber-900/50 border-2 border-yellow-500/50 rounded-xl p-4 backdrop-blur-sm">
+                        <p className="text-yellow-100 text-sm text-center flex items-center justify-center space-x-2">
+                          <AlertCircle className="h-5 w-5 text-yellow-300 flex-shrink-0" />
+                          <span>GPS non disponibile. Verrà richiesta l'attivazione o la pausa forzata.</span>
                         </p>
                       </div>
                     )}
                   </>
                 ) : breakInProgress ? (
-                  <div className="space-y-3">
-                    <div className="bg-orange-500 bg-opacity-30 border-2 border-orange-400 rounded-lg p-3">
-                      <div className="flex items-center justify-center space-x-2 mb-2">
-                        <div className="w-3 h-3 bg-orange-400 rounded-full animate-pulse"></div>
-                        <span className="text-white font-bold">PAUSA IN CORSO</span>
+                  <div className="space-y-4">
+                    <div className="bg-gradient-to-br from-orange-500/30 to-amber-500/30 border-2 border-orange-400 rounded-xl p-4 shadow-lg backdrop-blur-sm">
+                      <div className="flex items-center justify-center space-x-2.5 mb-3">
+                        <div className="relative">
+                          <div className="w-4 h-4 bg-orange-400 rounded-full animate-pulse"></div>
+                          <div className="absolute inset-0 w-4 h-4 bg-orange-400 rounded-full animate-ping"></div>
+                        </div>
+                        <span className="text-white font-bold text-lg">🍽️ PAUSA IN CORSO</span>
                       </div>
-                      <p className="text-center text-sm text-orange-100">
-                        Iniziata alle {breakStartTime}
+                      <p className="text-center text-sm text-orange-100 font-medium">
+                        ⏰ Iniziata alle <span className="text-white font-bold">{breakStartTime}</span>
                       </p>
                     </div>
 
                     <button
                       onClick={() => handleEndBreak(false)}
                       disabled={gpsLoading}
-                      className="w-full bg-green-500 hover:bg-green-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white py-3 px-4 rounded-lg font-medium flex items-center justify-center space-x-2 transition-colors"
+                      className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white py-4 px-5 rounded-xl font-bold text-base flex items-center justify-center space-x-2.5 transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
                     >
-                      <CheckCircle className="h-5 w-5" />
+                      <CheckCircle className="h-6 w-6" />
                       <span>
-                        {gpsLoading ? 'Verifica GPS...' : currentLocation ? '✅ TERMINA PAUSA' : '✅ TERMINA PAUSA (GPS richiesto)'}
+                        {gpsLoading ? 'Verifica GPS in corso...' : currentLocation ? '✅ TERMINA PAUSA PRANZO' : '✅ TERMINA PAUSA (Richiedi GPS)'}
                       </span>
                     </button>
                     {!currentLocation && !gpsLoading && (
-                      <div className="mt-2 bg-yellow-900/30 border border-yellow-600 rounded-lg p-3">
-                        <p className="text-yellow-200 text-xs text-center">
-                          ⚠️ GPS non disponibile. Cliccando il pulsante sopra verrai chiesto di attivare il GPS o di forzare la pausa.
+                      <div className="bg-gradient-to-r from-yellow-900/50 to-amber-900/50 border-2 border-yellow-500/50 rounded-xl p-4 backdrop-blur-sm">
+                        <p className="text-yellow-100 text-sm text-center flex items-center justify-center space-x-2">
+                          <AlertCircle className="h-5 w-5 text-yellow-300 flex-shrink-0" />
+                          <span>GPS non disponibile. Verrà richiesta l'attivazione o la pausa forzata.</span>
                         </p>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <div className="bg-green-500 bg-opacity-20 border border-green-400 rounded-lg p-3">
-                    <div className="flex items-center justify-center space-x-2 mb-2">
-                      <CheckCircle className="h-5 w-5 text-green-400" />
-                      <span className="text-white font-bold">Pausa Pranzo Effettuata</span>
+                  <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-2 border-green-400 rounded-xl p-4 shadow-lg backdrop-blur-sm">
+                    <div className="flex items-center justify-center space-x-2.5 mb-2">
+                      <CheckCircle className="h-6 w-6 text-green-300 animate-bounce" />
+                      <span className="text-white font-bold text-lg">✅ Pausa Completata</span>
                     </div>
                     {breakStartTime && breakEndTime && (
-                      <p className="text-center text-sm text-green-100">
-                        Dalle {breakStartTime} alle {breakEndTime}
+                      <p className="text-center text-sm text-green-100 font-medium">
+                        🕐 Dalle <span className="text-white font-bold">{breakStartTime}</span> alle <span className="text-white font-bold">{breakEndTime}</span>
                       </p>
                     )}
                   </div>
@@ -2323,20 +2421,54 @@ const WarehouseCheckIn: React.FC = () => {
                 </div>
               </div>
 
-              <div className="bg-gray-700 rounded-lg p-3">
-                <label className="block text-white font-medium mb-1.5 text-sm">
-                  Note (facoltative):
+              {/* Note Turno inserite DURANTE il turno (readonly) */}
+              {noteTurno && (
+                <div className="bg-gradient-to-r from-blue-900/50 to-indigo-900/50 rounded-lg p-3 border border-blue-600">
+                  <label className="block text-blue-200 font-medium mb-1.5 text-sm flex items-center space-x-2">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                    </svg>
+                    <span>📝 Note scritte durante il turno:</span>
+                  </label>
+                  <div className="bg-gray-800/70 text-blue-100 border border-blue-700 rounded-lg p-2.5 text-sm min-h-[50px] italic whitespace-pre-wrap">
+                    {noteTurno}
+                  </div>
+                  <p className="text-blue-300 text-xs mt-1.5 italic">
+                    ✓ Queste note sono state salvate in NoteTurno
+                  </p>
+                </div>
+              )}
+
+              {/* Note Checkout - Nuove note di fine turno */}
+              <div className="bg-gradient-to-r from-gray-700 to-gray-800 rounded-lg p-3 border border-gray-600">
+                <label className="block text-white font-medium mb-1.5 text-sm flex items-center space-x-2">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <span>🏁 Vuoi aggiungere note di fine turno?</span>
                 </label>
+                <p className="text-gray-400 text-xs mb-2">
+                  {noteTurno 
+                    ? 'Puoi aggiungere ulteriori osservazioni finali, problemi o consegne' 
+                    : 'Aggiungi eventuali osservazioni, problemi riscontrati o consegne da fare'}
+                </p>
                 <textarea
                   value={checkoutNotes}
                   onChange={(e) => setCheckoutNotes(e.target.value)}
-                  placeholder="Aggiungi note..."
-                  className="w-full bg-gray-800 text-white border border-gray-600 rounded-lg p-2 text-sm focus:outline-none focus:border-blue-500 min-h-[60px]"
+                  placeholder={noteTurno 
+                    ? "Note aggiuntive di fine turno (opzionali)..." 
+                    : "Note di fine turno (opzionali)..."}
+                  className="w-full bg-gray-900 text-white border-2 border-gray-600 rounded-lg p-2.5 text-sm focus:outline-none focus:border-green-500 focus:ring-2 focus:ring-green-500 min-h-[80px] placeholder-gray-500 transition-all"
                   maxLength={500}
                 />
-                <p className="text-gray-400 text-xs mt-1">
-                  {checkoutNotes.length}/500
-                </p>
+                <div className="flex items-center justify-between mt-1.5">
+                  <p className="text-gray-400 text-xs italic">
+                    {checkoutNotes.length > 0 ? '✓ Salvate in "notes" al checkout' : 'Facoltative'}
+                  </p>
+                  <p className="text-gray-400 text-xs">
+                    {checkoutNotes.length}/500
+                  </p>
+                </div>
               </div>
             </div>
 

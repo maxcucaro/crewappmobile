@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clock, MapPin, Plane, Gift, CheckCircle, AlertTriangle, CreditCard as Edit, Euro, Coffee, Star } from 'lucide-react';
+import { Clock, MapPin, Plane, Gift, CheckCircle, AlertTriangle, CreditCard as Edit, Euro, Coffee, Star, MessageSquare } from 'lucide-react';
 
 interface EventShiftCardProps {
   report: {
@@ -41,6 +41,7 @@ interface EventShiftCardProps {
       rectified_end_time?: string;
       convocation_start_time?: string;
       convocation_end_time?: string;
+      notedipendente?: string;
     };
     benefitBreakdown?: {
       name: string;
@@ -80,6 +81,15 @@ const EventShiftCard: React.FC<EventShiftCardProps> = ({ report, onRectify }) =>
     }
 
     return timeString;
+  };
+
+  // Converte ore decimali in formato HH:MM
+  const formatHoursAsTime = (decimalHours: number | undefined | null): string => {
+    if (!decimalHours) return '00:00';
+    const totalMinutes = Math.round(decimalHours * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
   };
 
   const getDiariaLabel = (type: string | undefined) => {
@@ -209,7 +219,7 @@ const EventShiftCard: React.FC<EventShiftCardProps> = ({ report, onRectify }) =>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-400">Ore Totali:</span>
                 <span className="text-sm font-bold text-blue-400">
-                  {timesheet.total_hours}h
+                  {formatHoursAsTime(timesheet.total_hours)}
                 </span>
               </div>
             </div>
@@ -374,6 +384,18 @@ const EventShiftCard: React.FC<EventShiftCardProps> = ({ report, onRectify }) =>
             <div>
               <div className="text-xs font-semibold text-orange-200 mb-1">Nota di Rettifica:</div>
               <div className="text-xs text-orange-300">{timesheet.rectification_notes}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {timesheet?.notedipendente && (
+        <div className="bg-blue-900 bg-opacity-30 border border-blue-700 rounded-lg p-3 mb-3">
+          <div className="flex items-start space-x-2">
+            <MessageSquare className="h-4 w-4 text-blue-400 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="text-xs font-semibold text-blue-200 mb-1">Note Dipendente:</div>
+              <div className="text-xs text-blue-300 whitespace-pre-wrap">{timesheet.notedipendente}</div>
             </div>
           </div>
         </div>

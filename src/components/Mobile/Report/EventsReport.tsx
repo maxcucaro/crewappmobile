@@ -47,6 +47,7 @@ interface EventReport {
     rectified_end_time?: string;
     convocation_start_time?: string;
     convocation_end_time?: string;
+    notedipendente?: string;
   };
   applicableBenefits: {
     id: string;
@@ -216,7 +217,8 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
           rectified_start_time,
           rectified_end_time,
           convocation_start_time,
-          convocation_end_time
+          convocation_end_time,
+          notedipendente
         `)
         .eq('crew_id', user?.id)
         .gte('date', startDate)

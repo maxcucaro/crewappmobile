@@ -143,7 +143,7 @@ const WarehouseShiftsReport: React.FC<WarehouseShiftsReportProps> = ({ selectedM
           warehouse_id: shift.warehouse_id || '',
           warehouse_name: 'Turno Magazzino',
           notes: shift.notes || '',
-          noteturno: '',
+          noteturno: shift.NoteTurno || '',
           giorno_turno: shift.date,
           nome_turno: 'Turno Magazzino',
           check_in_turno: checkInTime,
@@ -529,16 +529,36 @@ const WarehouseShiftsReport: React.FC<WarehouseShiftsReportProps> = ({ selectedM
                   )}
                 </div>
 
-                {/* Note Turno */}
-                {(shift.notes || shift.noteturno) && (
-                  <div className="bg-blue-900 bg-opacity-20 border border-blue-700 rounded-lg p-3 mb-3">
-                    <div className="flex items-start space-x-2">
-                      <FileText className="h-4 w-4 text-blue-400 flex-shrink-0 mt-0.5" />
-                      <div className="flex-1">
-                        <div className="text-xs font-semibold text-blue-200 mb-1">Note:</div>
-                        <div className="text-xs text-blue-100">{shift.notes || shift.noteturno}</div>
+                {/* Note Turno - Mostra entrambe le note se presenti */}
+                {(shift.noteturno || shift.notes) && (
+                  <div className="space-y-2 mb-3">
+                    {/* Note scritte durante il turno (NoteTurno) */}
+                    {shift.noteturno && (
+                      <div className="bg-gradient-to-r from-blue-900/30 to-indigo-900/30 border border-blue-700 rounded-lg p-3">
+                        <div className="flex items-start space-x-2">
+                          <svg className="h-4 w-4 text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                          <div className="flex-1">
+                            <div className="text-xs font-semibold text-blue-200 mb-1">📝 Note durante il turno:</div>
+                            <div className="text-xs text-blue-100 whitespace-pre-wrap">{shift.noteturno}</div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
+                    )}
+                    
+                    {/* Note di fine turno (notes) */}
+                    {shift.notes && (
+                      <div className="bg-gradient-to-r from-gray-800/50 to-gray-900/50 border border-gray-600 rounded-lg p-3">
+                        <div className="flex items-start space-x-2">
+                          <FileText className="h-4 w-4 text-gray-400 flex-shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <div className="text-xs font-semibold text-gray-300 mb-1">🏁 Note fine turno:</div>
+                            <div className="text-xs text-gray-200 whitespace-pre-wrap">{shift.notes}</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
