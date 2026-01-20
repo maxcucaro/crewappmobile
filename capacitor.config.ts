@@ -6,7 +6,14 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   server: {
     androidScheme: 'https',
+    iosScheme: 'https',
     cleartext: true
+  },
+  ios: {
+    contentInset: 'automatic',
+    backgroundColor: '#1a1a1a',
+    // Limita l'app a iPhone (no iPad)
+    limitsNavigationsToAppBoundDomains: false
   },
   android: {
     allowMixedContent: true,
@@ -17,6 +24,7 @@ const config: CapacitorConfig = {
       launchShowDuration: 2000,
       backgroundColor: '#1a1a1a',
       androidScaleType: 'CENTER_CROP',
+      iosContentMode: 'scaleAspectFill',
       showSpinner: true,
       spinnerColor: '#3b82f6'
     },
