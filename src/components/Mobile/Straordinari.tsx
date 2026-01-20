@@ -195,6 +195,24 @@ const Straordinari: React.FC = () => {
     if (!user?.id) return [];
     const out: CandidateShift[] = [];
 
+    // Load existing overtime requests to exclude already requested shifts
+    let existingRequestTurnoIds: string[] = [];
+    try {
+      const { data: existingRequests } = await supabase
+        .from('richieste_straordinari_v2')
+        .select('turno_id')
+        .eq('crewid', user.id)
+        .not('turno_id', 'is', null);
+      
+      if (existingRequests && existingRequests.length > 0) {
+        existingRequestTurnoIds = existingRequests
+          .map((req: any) => req.turno_id)
+          .filter((id: string | null) => id !== null);
+      }
+    } catch (e) {
+      console.warn('Failed to load existing overtime requests', e);
+    }
+
     // Load warehouse shifts with overtime (requisito_straordinari = true)
     try {
       const { data: overtimeShifts } = await supabase
@@ -246,10 +264,41 @@ const Straordinari: React.FC = () => {
             const workedHours = shift.net_hours ? Number(shift.net_hours) : null;
             const scheduledHours = workedHours ? Math.round((workedHours - excessHours) * 100) / 100 : 8;
 
+            // Se assegnazione_id è NULL, prova a trovarlo cercando in crew_assegnazione_turni
+            let assignmentId = shift.assegnazione_id;
+            if (!assignmentId && shift.shift_id && shift.date) {
+              try {
+                const { data: assignment } = await supabase
+                  .from('crew_assegnazione_turni')
+                  .select('id')
+                  .eq('dipendente_id', user.id)
+                  .eq('turno_id', shift.shift_id)
+                  .eq('data_turno', shift.date)
+                  .maybeSingle();
+                
+                if (assignment) {
+                  assignmentId = assignment.id;
+                  console.log('Found assignment via fallback:', assignmentId);
+                } else {
+                  console.warn('No assignment found for shift', { shift_id: shift.shift_id, date: shift.date, user_id: user.id });
+                }
+              } catch (e) {
+                console.warn('Failed to find assignment for shift', shift.id, e);
+              }
+            }
+
+            console.log('Final assignmentId for shift:', { shift_id: shift.id, date: shift.date, assignmentId });
+
+            // Skip if already requested
+            if (assignmentId && existingRequestTurnoIds.includes(assignmentId)) {
+              console.log('Skipping shift - already requested:', assignmentId);
+              continue;
+            }
+
             out.push({
               source: 'warehouse',
-              assignment_id: shift.assegnazione_id || shift.shift_id || shift.id,
-              refShiftId: shift.shift_id || shift.id,
+              assignment_id: assignmentId || shift.shift_id || shift.id,
+              refShiftId: assignmentId, // Usa assegnazione_id che è FK a crew_assegnazione_turni
               date: shift.date,
               title: `Turno Magazzino ${shift.date}`,
               scheduledHours,
@@ -383,13 +432,24 @@ const Straordinari: React.FC = () => {
 
       // attach shift/event references if available
       if (shift) {
+        console.log('Shift data before insert:', { 
+          source: shift.source, 
+          refShiftId: shift.refShiftId, 
+          refEventId: shift.refEventId,
+          assignment_id: shift.assignment_id 
+        });
+        
         if (shift.source === 'warehouse' && shift.refShiftId) {
           payload.turno_id = shift.refShiftId;
+          console.log('Added turno_id to payload:', shift.refShiftId);
         }
         if (shift.source === 'event' && shift.refEventId) {
           payload.event_id = shift.refEventId;
+          console.log('Added event_id to payload:', shift.refEventId);
         }
       }
+
+      console.log('Final payload before insert:', payload);
 
       // Insert into richieste_straordinari_v2
       const { error } = await supabase.from('richieste_straordinari_v2').insert(payload);

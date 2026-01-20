@@ -58,14 +58,23 @@ export const usePersistentTimer = () => {
   }, [activeSessions.length]);
 
   const startTimer = (checkInTime: string) => {
+    console.log('🕐 startTimer chiamato con checkInTime:', checkInTime);
+    
     // Pulisci timer esistente
     if (timerRef.current) {
       clearInterval(timerRef.current);
     }
 
+    if (!checkInTime) {
+      console.error('❌ checkInTime è null o undefined!');
+      return;
+    }
+
     // Calcola ora di inizio
     const today = new Date();
-    const [hours, minutes] = checkInTime.split(':').map(Number);
+    const timeParts = checkInTime.split(':');
+    console.log('🕐 timeParts:', timeParts);
+    const [hours, minutes] = timeParts.map(Number);
     const startTime = new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours, minutes, 0);
 
     const updateTimer = () => {
@@ -160,26 +169,51 @@ export const usePersistentTimer = () => {
       }
 
       const today = new Date().toISOString().split('T')[0];
+      const tomorrow = new Date(new Date().getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      
+      // Usa la data locale italiana invece di UTC
+      const localDate = new Date();
+      const localToday = localDate.getFullYear() + '-' + 
+                         String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
+                         String(localDate.getDate()).padStart(2, '0');
+      const localTomorrow = new Date(localDate.getTime() + 24 * 60 * 60 * 1000);
+      const localTomorrowStr = localTomorrow.getFullYear() + '-' + 
+                                String(localTomorrow.getMonth() + 1).padStart(2, '0') + '-' + 
+                                String(localTomorrow.getDate()).padStart(2, '0');
+      
+      console.log('📅 Date di ricerca:', { localToday, localTomorrowStr, utcToday: today });
+      
       const allSessions: CheckInSession[] = [];
 
       // Cerca check-in magazzino attivo (checked_in ma non checked_out)
-      const { data: warehouseCheckIn, error: warehouseError } = await supabase
+      // Cerca sia oggi che domani per gestire turni notturni
+      const { data: warehouseCheckIns, error: warehouseError } = await supabase
         .from('warehouse_checkins')
         .select('*')
         .eq('crew_id', user?.id)
-        .eq('date', today)
+        .in('date', [localToday, localTomorrowStr])
         .in('status', ['active', 'checked_in'])
         .is('check_out_time', null)
-        .maybeSingle();
+        .order('date', { ascending: true });
+
+      const warehouseCheckIn = warehouseCheckIns?.[0] || null;
 
       if (!warehouseError && warehouseCheckIn) {
+        console.log('📦 Warehouse check-in trovato:', warehouseCheckIn);
+        console.log('   - check_in_time:', warehouseCheckIn.check_in_time);
+        console.log('   - ora_inizio_turno:', warehouseCheckIn.ora_inizio_turno);
+        console.log('   - ora_fine_turno:', warehouseCheckIn.ora_fine_turno);
+        
         const session: CheckInSession = {
           id: warehouseCheckIn.id,
           type: 'warehouse',
           warehouseId: warehouseCheckIn.warehouse_id,
           checkInTime: warehouseCheckIn.check_in_time,
-          scheduledEndTime: '17:00',
+          scheduledEndTime: warehouseCheckIn.ora_fine_turno || '17:00',
           shiftName: 'Turno Magazzino',
+          shiftStartTime: warehouseCheckIn.ora_inizio_turno || '09:00',
+          shiftEndTime: warehouseCheckIn.ora_fine_turno || '17:00',
+          hasLunchBreak: warehouseCheckIn.break_minutes > 0,
           hasCompanyMeal: warehouseCheckIn.company_meal || false,
           hasMealVoucher: warehouseCheckIn.meal_voucher || false,
           breakTime: warehouseCheckIn.break_minutes || 0,
@@ -187,6 +221,7 @@ export const usePersistentTimer = () => {
           tableName: 'warehouse_checkins'
         };
 
+        console.log('📦 Sessione creata:', session);
         allSessions.push(session);
         setCurrentSession(session);
       }

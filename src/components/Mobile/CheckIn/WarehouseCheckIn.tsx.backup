@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { QrCode, MapPin, Clock, CheckCircle, AlertCircle, Camera, X, Building2, RefreshCw, Navigation, Timer, Utensils, Gift, Coffee } from 'lucide-react';
+import { QrCode, MapPin, Clock, CheckCircle, AlertCircle, Camera, X, Building2, RefreshCw, Navigation, Utensils, Gift, Coffee } from 'lucide-react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { useAuth } from '../../../context/AuthContext';
 import { useToastContext } from '../../../context/ToastContext';
@@ -17,9 +17,9 @@ interface WarehouseShift {
   ora_inizio_turno: string;
   ora_fine_turno: string;
   nome_azienda: string;
-  crew_template_turni?: {
-    pausa_pranzo?: boolean;
-    ora_inizio_turno: string;
+  crew_template_turni?:  {
+    pausa_pranzo?:  boolean;
+    ora_inizio_turno:  string;
     ora_fine_turno: string;
   };
 }
@@ -30,7 +30,7 @@ interface WarehouseInfo {
   address: string;
   qr_code_value: string;
   company_id: string;
-  backup_code: string;
+  backup_code:  string;
 }
 
 interface MealBenefits {
@@ -42,7 +42,7 @@ interface MealBenefits {
 const WarehouseCheckIn: React.FC = () => {
   const { user } = useAuth();
   const { showSuccess, showError, showWarning, showInfo } = useToastContext();
-  const { currentLocation, getCurrentLocation, isLoading: gpsLoading, error: gpsError } = useGPSLocation();
+  const { currentLocation, getCurrentLocation, isLoading:  gpsLoading, error: gpsError } = useGPSLocation();
   const { isOnline, addOfflineData } = useOfflineSync();
   const { currentSession, activeSessions, elapsedTime, elapsedTimes, startSession, endSession, manualCheckOut, loadActiveSession } = usePersistentTimer();
   
@@ -52,18 +52,17 @@ const WarehouseCheckIn: React.FC = () => {
   const [availableWarehouses, setAvailableWarehouses] = useState<WarehouseInfo[]>([]);
   const [mealBenefits, setMealBenefits] = useState<MealBenefits | null>(null);
   const [loading, setLoading] = useState(true);
-  const [scanResult, setScanResult] = useState<string | null>(null);
   const [selectedShift, setSelectedShift] = useState<WarehouseShift | null>(null);
   const [existingCheckIn, setExistingCheckIn] = useState<any>(null);
   const [todayCheckIns, setTodayCheckIns] = useState<any[]>([]);
   const [manualQrCode, setManualQrCode] = useState('');
   const [shiftValidation, setShiftValidation] = useState<{
     isValid: boolean;
-    reason?: string;
+    reason?:  string;
     canCheckIn: boolean;
     canCheckOut: boolean;
     isExpired: boolean;
-    hoursLate?: number;
+    hoursLate?:  number;
   } | null>(null);
   
   // Stati meal selection
@@ -83,7 +82,6 @@ const WarehouseCheckIn: React.FC = () => {
   const [breakInProgress, setBreakInProgress] = useState(false);
   const [breakStartTime, setBreakStartTime] = useState<string | null>(null);
   const [breakEndTime, setBreakEndTime] = useState<string | null>(null);
-  const [breakStartLocation, setBreakStartLocation] = useState<any>(null);
 
   // Stati modal inserimento tardivo pausa
   const [showLateBreakModal, setShowLateBreakModal] = useState(false);
@@ -93,21 +91,61 @@ const WarehouseCheckIn: React.FC = () => {
 
   // Stati modal conferma check-out
   const [showCheckOutConfirmModal, setShowCheckOutConfirmModal] = useState(false);
+  const [checkoutNotes, setCheckoutNotes] = useState('');
+  const [noteTurno, setNoteTurno] = useState('');
+  const [noteTurnoExpanded, setNoteTurnoExpanded] = useState(false);
+  const [modalPosition, setModalPosition] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
   // Stati modal forzatura pausa senza GPS
   const [showForceBreakModal, setShowForceBreakModal] = useState(false);
   const [forceBreakType, setForceBreakType] = useState<'start' | 'end' | null>(null);
 
-  const performAutoCheckout = useCallback(async (checkIn: any, originalEndTime: string, hoursLate: number) => {
+  // Funzioni per il drag del modale
+  const handleDragStart = (e: React.TouchEvent | React.MouseEvent) => {
+    setIsDragging(true);
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    setDragStart({ x: clientX - modalPosition.x, y: clientY - modalPosition.y });
+  };
+
+  const handleDragMove = (e: React.TouchEvent | React.MouseEvent) => {
+    if (!isDragging) return;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    setModalPosition({
+      x: clientX - dragStart.x,
+      y: clientY - dragStart.y
+    });
+  };
+
+  const handleDragEnd = () => {
+    setIsDragging(false);
+  };
+
+  const performAutoCheckout = useCallback(async (checkIn: any, originalEndTime:  string, hoursLate:  number) => {
     try {
-      const { data, error: updateError } = await supabase
+      const updateData: any = {
+        check_out_time: originalEndTime,
+        status: 'completed',
+        has_checked_out: true,
+        auto_checkout: true,
+        notes: `Auto-checkout effettuato alle ${originalEndTime}. Sessione chiusa automaticamente dopo ${hoursLate.toFixed(1)} ore di ritardo.`
+      };
+
+      // Se il turno aveva pausa pranzo e non è stata registrata, applicala automaticamente
+      if (checkIn.break_minutes > 0 && !checkIn.has_taken_break && !checkIn.pausa_pranzo_inizio) {
+        updateData.has_taken_break = true;
+        updateData.break_auto_applied = true;
+        updateData.pausa_pranzo_inizio = '12:00';
+        updateData.pausa_pranzo_fine = '13:00';
+        console.log('⏰ Pausa pranzo applicata automaticamente all\'auto-checkout');
+      }
+
+      const { error:  updateError } = await supabase
         .from('warehouse_checkins')
-        .update({
-          check_out_time: originalEndTime,
-          status: 'completed',
-          has_checked_out: true,
-          notes: `Auto-checkout effettuato alle ${originalEndTime}. Sessione chiusa automaticamente dopo ${hoursLate.toFixed(1)} ore di ritardo.`
-        })
+        .update(updateData)
         .eq('id', checkIn.id)
         .select()
         .single();
@@ -122,7 +160,7 @@ const WarehouseCheckIn: React.FC = () => {
 
       showInfo(
         'Turno Auto-Completato',
-        `Il tuo turno è stato automaticamente completato alle ${originalEndTime}. Sessione chiusa per superamento orario.`,
+        `Il tuo turno è stato completato automaticamente alle ${originalEndTime}. ${checkIn.break_minutes > 0 && !checkIn.has_taken_break ? 'Pausa pranzo registrata automaticamente.' : ''}`,
         8000
       );
 
@@ -138,8 +176,6 @@ const WarehouseCheckIn: React.FC = () => {
     }
 
     try {
-      const today = getTodayString();
-
       // Usa ora locale italiana per confronti
       const now = new Date();
       const italianTime = now.toLocaleTimeString('it-IT', {
@@ -148,38 +184,42 @@ const WarehouseCheckIn: React.FC = () => {
         hour12: false,
         timeZone: 'Europe/Rome'
       });
-      const currentTime = italianTime.replace(':', ':'); // Formato HH:mm
+      const currentTime = italianTime. replace(':', ': '); // Formato HH:mm
 
       // IMPORTANTE: Trova SOLO il check-in della sessione corrente
       // NON auto-completare altri turni per cui l'utente non ha mai fatto check-in
-      const { data: currentCheckIn, error: checkError } = await supabase
+      const { data:  currentCheckIn, error: checkError } = await supabase
         .from('warehouse_checkins')
         .select(`
           *,
-          crew_template_turni!shift_id(ora_fine_turno)
+          crew_template_turni! shift_id(ora_fine_turno)
         `)
         .eq('id', currentSession.id)
         .eq('status', 'active')
         .is('check_out_time', null)
         .maybeSingle();
 
-      if (checkError || !currentCheckIn) {
+      if (checkError || ! currentCheckIn) {
         return;
       }
 
       const shiftEndTime = currentCheckIn.crew_template_turni?.ora_fine_turno || currentCheckIn.ora_fine_turno || '17:00';
       const endTime = formatTime(shiftEndTime);
 
-      // Controlla se il turno è scaduto
-      if (isTimeAfter(currentTime, endTime)) {
-        const hoursLate = calculateHoursLate(endTime, currentTime);
+      // Controlla se è passata 1 ORA dalla fine del turno
+      const minutesLate = calculateMinutesDifference(currentTime, endTime);
+      
+      // Auto-checkout SOLO se è passata almeno 1 ora (60 minuti) dalla fine turno
+      if (minutesLate >= 60) {
+        const hoursLate = minutesLate / 60;
+        console.log(`⏰ Auto-checkout attivato: ${minutesLate} minuti dopo la fine turno (${endTime})`);
         await performAutoCheckout(currentCheckIn, endTime, hoursLate);
       }
 
     } catch (error) {
       // Silenzioso
     }
-  }, [currentSession, user?.id, performAutoCheckout]);
+  }, [currentSession, user?. id, performAutoCheckout]);
 
   useEffect(() => {
     if (user?.id) {
@@ -192,11 +232,12 @@ const WarehouseCheckIn: React.FC = () => {
 
     return () => {
       if (scannerRef.current) {
-        scannerRef.current.clear();
+        scannerRef.current. clear();
       }
     };
   }, [user?.id]);
 
+  // ✅ CORREZIONE: Carica stato pausa da pausa_pranzo_*
   const loadBreakStatus = async () => {
     if (!currentSession || currentSession.type !== 'warehouse') {
       return;
@@ -205,21 +246,20 @@ const WarehouseCheckIn: React.FC = () => {
     try {
       const { data, error } = await supabase
         .from('warehouse_checkins')
-        .select('break_start_time, break_end_time, break_start_location, has_taken_break')
+        .select('pausa_pranzo_inizio, pausa_pranzo_fine, break_start_location, has_taken_break')
         .eq('id', currentSession.id)
         .maybeSingle();
 
       if (error || !data) return;
 
-      if (data.break_start_time && !data.break_end_time) {
+      if (data.pausa_pranzo_inizio && !data.pausa_pranzo_fine) {
         setBreakInProgress(true);
-        setBreakStartTime(data.break_start_time);
+        setBreakStartTime(data.pausa_pranzo_inizio);
         setBreakEndTime(null);
-        setBreakStartLocation(data.break_start_location);
-      } else if (data.break_start_time && data.break_end_time) {
+      } else if (data.pausa_pranzo_inizio && data.pausa_pranzo_fine) {
         setBreakInProgress(false);
-        setBreakStartTime(data.break_start_time);
-        setBreakEndTime(data.break_end_time);
+        setBreakStartTime(data.pausa_pranzo_inizio);
+        setBreakEndTime(data.pausa_pranzo_fine);
       }
     } catch (error) {
       console.error('Errore caricamento stato pausa:', error);
@@ -228,7 +268,7 @@ const WarehouseCheckIn: React.FC = () => {
 
   // Carica stato pausa quando cambia la sessione
   useEffect(() => {
-    if (currentSession?.type === 'warehouse') {
+    if (currentSession?. type === 'warehouse') {
       loadBreakStatus();
     }
   }, [currentSession?.id]);
@@ -254,7 +294,7 @@ const WarehouseCheckIn: React.FC = () => {
 
   // Polling per auto-checkout ogni 60 secondi
   useEffect(() => {
-    if (!user?.id || !currentSession || currentSession.type !== 'warehouse') {
+    if (!user?. id || !currentSession || currentSession.type !== 'warehouse') {
       return;
     }
 
@@ -275,9 +315,9 @@ const WarehouseCheckIn: React.FC = () => {
     const now = new Date();
 
     // Usa ora locale italiana
-    const italianTime = now.toLocaleTimeString('it-IT', {
+    const italianTime = now. toLocaleTimeString('it-IT', {
       hour: '2-digit',
-      minute: '2-digit',
+      minute:  '2-digit',
       hour12: false,
       timeZone: 'Europe/Rome'
     });
@@ -312,13 +352,80 @@ const WarehouseCheckIn: React.FC = () => {
     // Controlla orario
     const isBeforeStart = isTimeBefore(currentTime, shiftStartTime);
     const isAfterEnd = isTimeAfter(currentTime, shiftEndTime);
-    const isInShiftTime = !isBeforeStart && !isAfterEnd;
+    
+    // Gestione turni notturni: se l'ora corrente è molto prima dell'ora di inizio (es. 00:26 vs 23:30)
+    // potrebbe essere che siamo dopo la mezzanotte e il turno è iniziato ieri
+    const currentMinutes = parseInt(currentTime.split(':')[0]) * 60 + parseInt(currentTime.split(':')[1]);
+    const startMinutes = parseInt(shiftStartTime.split(':')[0]) * 60 + parseInt(shiftStartTime.split(':')[1]);
+    const endMinutes = parseInt(shiftEndTime.split(':')[0]) * 60 + parseInt(shiftEndTime.split(':')[1]);
+    
+    // Se siamo in orari notturni (00:00 - 05:00) e il turno inizia in orari serali (>= 20:00)
+    // siamo probabilmente PRIMA del turno che inizierà stasera
+    const isNightHour = currentMinutes < 300; // Prima delle 05:00
+    const isEveningStart = startMinutes >= 1200; // Dopo le 20:00
+    
+    if (isNightHour && isEveningStart) {
+      // Siamo nelle ore notturne (es. 00:26) e il turno inizia stasera (es. 23:30)
+      // Calcola quanto manca: startMinutes - currentMinutes
+      const minutesEarly = startMinutes - currentMinutes;
+      const ALLOWED_EARLY_MINUTES = 4 * 60; // 240 minuti (4 ore)
+
+      console.log('🌙 Turno notturno - Check anticipo:', {
+        currentTime,
+        currentMinutes,
+        shiftStartTime,
+        startMinutes,
+        minutesEarly,
+        allowedMinutes: ALLOWED_EARLY_MINUTES,
+        isAllowed: minutesEarly <= ALLOWED_EARLY_MINUTES
+      });
+
+      if (minutesEarly <= ALLOWED_EARLY_MINUTES) {
+        return {
+          isValid: true,
+          reason: `Check-in anticipato consentito (turno inizia alle ${shiftStartTime})`,
+          canCheckIn: true,
+          canCheckOut: false,
+          isExpired: false
+        };
+      }
+
+      return {
+        isValid: false,
+        reason: `Turno inizia alle ${shiftStartTime} (tra ${Math.floor(minutesEarly / 60)} ore e ${minutesEarly % 60} minuti). Check-in disponibile dalle ${calculateEarlyCheckInTime(shiftStartTime)}.`,
+        canCheckIn: false,
+        canCheckOut: false,
+        isExpired: false
+      };
+    }
     
     if (isBeforeStart) {
       const minutesEarly = calculateMinutesDifference(shiftStartTime, currentTime);
+      const ALLOWED_EARLY_MINUTES = 4 * 60; // 240 minuti (4 ore)
+
+      console.log('⏰ Check anticipo:', {
+        currentTime,
+        shiftStartTime,
+        minutesEarly,
+        allowedMinutes: ALLOWED_EARLY_MINUTES,
+        isAllowed: minutesEarly <= ALLOWED_EARLY_MINUTES
+      });
+
+      // Permetti check-in se siamo entro le 4 ore prima dell'inizio
+      if (minutesEarly <= ALLOWED_EARLY_MINUTES) {
+        return {
+          isValid: true,
+          reason: `Check-in anticipato consentito (turno inizia alle ${shiftStartTime})`,
+          canCheckIn: true,
+          canCheckOut: false,
+          isExpired: false
+        };
+      }
+
+      // Troppo in anticipo (più di 4 ore prima)
       return {
         isValid: false,
-        reason: `Turno inizia alle ${shiftStartTime} (tra ${minutesEarly} minuti)`,
+        reason: `Turno inizia alle ${shiftStartTime} (tra ${Math.floor(minutesEarly / 60)} ore e ${minutesEarly % 60} minuti). Check-in disponibile dalle ${calculateEarlyCheckInTime(shiftStartTime)}.`,
         canCheckIn: false,
         canCheckOut: false,
         isExpired: false
@@ -329,7 +436,7 @@ const WarehouseCheckIn: React.FC = () => {
       const hoursLate = calculateHoursLate(shiftEndTime, currentTime);
       return {
         isValid: false,
-        reason: `Turno terminato alle ${shiftEndTime} (${hoursLate.toFixed(1)} ore fa)`,
+        reason: `Turno terminato alle ${shiftEndTime} (${hoursLate. toFixed(1)} ore fa)`,
         canCheckIn: false,
         canCheckOut: false,
         isExpired: true,
@@ -339,7 +446,7 @@ const WarehouseCheckIn: React.FC = () => {
     
     return {
       isValid: true,
-      reason: `Turno attivo: ${shiftStartTime} - ${shiftEndTime}`,
+      reason:  `Turno attivo:  ${shiftStartTime} - ${shiftEndTime}`,
       canCheckIn: true,
       canCheckOut: true,
       isExpired: false
@@ -347,7 +454,7 @@ const WarehouseCheckIn: React.FC = () => {
   };
 
   const isTimeBefore = (time1: string, time2: string): boolean => {
-    const [h1, m1] = time1.split(':').map(Number);
+    const [h1, m1] = time1.split(': ').map(Number);
     const [h2, m2] = time2.split(':').map(Number);
     return (h1 * 60 + m1) < (h2 * 60 + m2);
   };
@@ -358,7 +465,7 @@ const WarehouseCheckIn: React.FC = () => {
     return (h1 * 60 + m1) > (h2 * 60 + m2);
   };
 
-  const calculateMinutesDifference = (futureTime: string, currentTime: string): number => {
+  const calculateMinutesDifference = (futureTime: string, currentTime:  string): number => {
     const [h1, m1] = futureTime.split(':').map(Number);
     const [h2, m2] = currentTime.split(':').map(Number);
     return (h1 * 60 + m1) - (h2 * 60 + m2);
@@ -371,10 +478,27 @@ const WarehouseCheckIn: React.FC = () => {
     return diffMinutes / 60;
   };
 
+  const calculateEarlyCheckInTime = (shiftStartTime: string): string => {
+    const [hours, minutes] = shiftStartTime.split(':').map(Number);
+    const totalMinutes = hours * 60 + minutes - 240; // 4 ore prima
+    
+    if (totalMinutes < 0) {
+      // Se va nel giorno precedente
+      const adjustedMinutes = totalMinutes + 24 * 60;
+      const h = Math.floor(adjustedMinutes / 60);
+      const m = adjustedMinutes % 60;
+      return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')} (giorno prima)`;
+    }
+    
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+  };
+
   const loadMealBenefits = async () => {
     try {
       
-      const { data: mealData, error: mealError } = await supabase
+      const { data: mealData, error:  mealError } = await supabase
         .from('employee_meal_benefits')
         .select('*')
         .eq('dipendente_id', user?.id)
@@ -395,7 +519,7 @@ const WarehouseCheckIn: React.FC = () => {
         setMealBenefits({
           buoni_pasto_enabled: mealData.buoni_pasto_enabled,
           buoni_pasto_value: mealData.buoni_pasto_value || 7.50,
-          pasto_aziendale_cost: mealData.pasto_aziendale_cost || 12.00
+          pasto_aziendale_cost:  mealData.pasto_aziendale_cost || 12.00
         });
       } else {
         // Valori di default
@@ -420,13 +544,13 @@ const WarehouseCheckIn: React.FC = () => {
       const today = getTodayString();
 
       // Carica TUTTI i check-in di oggi (possono essere multipli)
-      const { data: existingData, error: existingError } = await supabase
+      const { data:  existingData, error: existingError } = await supabase
         .from('warehouse_checkins')
         .select('*')
         .eq('crew_id', user?.id)
         .eq('date', today);
 
-      if (!existingError && existingData) {
+      if (! existingError && existingData) {
         console.log('📋 Check-in trovati oggi:', existingData.length);
         setTodayCheckIns(existingData);
 
@@ -435,29 +559,23 @@ const WarehouseCheckIn: React.FC = () => {
         setExistingCheckIn(activeCheckIn || null);
 
         // Se c'è un check-in attivo ma la sessione locale non è sincronizzata, ripristinala
-        if (activeCheckIn && (!currentSession || currentSession.id !== activeCheckIn.id)) {
+        if (activeCheckIn && (! currentSession || currentSession.id !== activeCheckIn.id)) {
           console.log('🔄 Ripristino sessione da check-in attivo nel DB');
 
-          // Carica dati turno completi
-          const { data: shiftData } = await supabase
-            .from('crew_assegnazione_turni')
-            .select('*, crew_template_turni!turno_id(pausa_pranzo, ora_inizio_turno, ora_fine_turno)')
-            .eq('id', activeCheckIn.shift_id)
-            .maybeSingle();
-
-          const shiftStartTime = shiftData?.crew_template_turni?.ora_inizio_turno || shiftData?.ora_inizio_turno || '09:00';
-          const shiftEndTime = shiftData?.crew_template_turni?.ora_fine_turno || shiftData?.ora_fine_turno || '17:00';
-          const hasLunchBreak = shiftData?.crew_template_turni?.pausa_pranzo !== false;
+          // Usa gli orari già presenti in warehouse_checkins
+          const shiftStartTime = activeCheckIn.ora_inizio_turno || '09:00';
+          const shiftEndTime = activeCheckIn.ora_fine_turno || '17:00';
+          const hasLunchBreak = activeCheckIn.break_minutes > 0;
 
           startSession({
             id: activeCheckIn.id,
             type: 'warehouse',
-            warehouseId: activeCheckIn.warehouse_id,
+            warehouseId: activeCheckIn. warehouse_id,
             checkInTime: activeCheckIn.check_in_time,
             scheduledEndTime: formatTime(shiftEndTime),
-            shiftName: shiftData?.nome_turno || 'Turno Magazzino',
-            shiftStartTime: shiftStartTime,
-            shiftEndTime: shiftEndTime,
+            shiftName: 'Turno Magazzino',
+            shiftStartTime:  formatTime(shiftStartTime),
+            shiftEndTime: formatTime(shiftEndTime),
             hasLunchBreak: hasLunchBreak,
             hasCompanyMeal: activeCheckIn.company_meal || false,
             hasMealVoucher: activeCheckIn.meal_voucher || false,
@@ -487,7 +605,7 @@ const WarehouseCheckIn: React.FC = () => {
           .eq('id', checkIn.shift_id)
           .maybeSingle();
 
-        if (checkIn.status !== 'completed' || !shiftData?.crew_template_turni?.pausa_pranzo) {
+        if (checkIn.status !== 'completed' || !shiftData?. crew_template_turni?.pausa_pranzo) {
           continue;
         }
 
@@ -498,7 +616,7 @@ const WarehouseCheckIn: React.FC = () => {
 
         // Calcola ore passate dal check-out
         const checkOutDateTime = new Date(`${checkIn.date}T${checkIn.check_out_time}`);
-        const hoursElapsed = (now.getTime() - checkOutDateTime.getTime()) / (1000 * 60 * 60);
+        const hoursElapsed = (now. getTime() - checkOutDateTime.getTime()) / (1000 * 60 * 60);
 
         // Se sono passate meno di 8 ore, mostra il modal
         if (hoursElapsed < 8) {
@@ -530,7 +648,7 @@ const WarehouseCheckIn: React.FC = () => {
             pausa_pranzo,
             warehouse_id,
             nome_magazzino,
-            warehouses!warehouse_id(
+            warehouses! warehouse_id(
               name,
               address
             )
@@ -549,17 +667,17 @@ const WarehouseCheckIn: React.FC = () => {
         const mappedShifts = (warehouseShifts || []).map(shift => ({
           ...shift,
           // Sovrascrivi con i dati del template (SEMPRE prioritari)
-          ora_inizio_turno: shift.crew_template_turni?.ora_inizio_turno || shift.ora_inizio_turno,
+          ora_inizio_turno: shift.crew_template_turni?.ora_inizio_turno || shift. ora_inizio_turno,
           ora_fine_turno: shift.crew_template_turni?.ora_fine_turno || shift.ora_fine_turno,
           nome_magazzino: shift.crew_template_turni?.nome_magazzino || shift.nome_magazzino,
           warehouse_address: shift.crew_template_turni?.warehouses?.address || 'Indirizzo non disponibile'
         }));
 
-        console.log('✅ Turni magazzino caricati:', mappedShifts.length, mappedShifts.map(s => ({
+        console.log('✅ Turni magazzino caricati:', mappedShifts.length, mappedShifts. map(s => ({
           nome: s.nome_turno,
-          data: s.data_turno,
+          data:  s.data_turno,
           orario: `${s.ora_inizio_turno}-${s.ora_fine_turno}`,
-          template_orario: `${s.crew_template_turni?.ora_inizio_turno}-${s.crew_template_turni?.ora_fine_turno}`
+          template_orario: `${s.crew_template_turni?.ora_inizio_turno}-${s.crew_template_turni?. ora_fine_turno}`
         })));
 
         setTodayWarehouseShifts(mappedShifts);
@@ -596,16 +714,16 @@ const WarehouseCheckIn: React.FC = () => {
     const validation = validateShiftTiming(shift);
     setShiftValidation(validation);
     
-    if (!validation.isValid || !validation.canCheckIn) {
+    if (! validation.isValid || !validation.canCheckIn) {
       if (validation.isExpired) {
         showError(
           'Turno Scaduto', 
-          `Non puoi fare check-in: ${validation.reason}`
+          `Non puoi fare check-in:  ${validation.reason}`
         );
       } else {
         showWarning(
           'Turno Non Disponibile', 
-          `Check-in non disponibile: ${validation.reason}`
+          `Check-in non disponibile:  ${validation.reason}`
         );
       }
       return;
@@ -615,7 +733,7 @@ const WarehouseCheckIn: React.FC = () => {
     
     // Step 1: Verifica GPS
     if (!currentLocation) {
-      showWarning('GPS Richiesto', 'Attivazione GPS in corso per il check-in magazzino...');
+      showWarning('GPS Richiesto', 'Attivazione GPS in corso per il check-in magazzino.. .');
       getCurrentLocation({ requiredAccuracy: 20, maxRetries: 3 }).then(() => {
         // Dopo GPS, vai alla selezione pasti
         proceedToMealSelection(shift);
@@ -629,7 +747,7 @@ const WarehouseCheckIn: React.FC = () => {
   const proceedToMealSelection = (shift: WarehouseShift) => {
     // Step 2: Se il turno prevede pausa pranzo, chiedi per il pasto
     // Imposta automaticamente buono pasto se il dipendente ha il benefit
-    setWantsMealVoucher(mealBenefits?.buoni_pasto_enabled || false);
+    setWantsMealVoucher(mealBenefits?. buoni_pasto_enabled || false);
     
     if (shift.crew_template_turni?.pausa_pranzo !== false) { // Default true se non specificato
       setCurrentView('meal_selection');
@@ -667,8 +785,7 @@ const WarehouseCheckIn: React.FC = () => {
           formatsToSupport: [0],
           defaultZoomValueIfSupported: 2,
           videoConstraints: {
-            facingMode: "environment",
-            advanced: [{ facingMode: "environment" }]
+            facingMode: "environment"
           },
           experimentalFeatures: {
             useBarCodeDetectorIfSupported: true
@@ -692,7 +809,6 @@ const WarehouseCheckIn: React.FC = () => {
   };
 
   const onScanSuccess = (decodedText: string) => {
-    setScanResult(decodedText);
     setManualQrCode('');
     
     if (scannerRef.current) {
@@ -707,7 +823,7 @@ const WarehouseCheckIn: React.FC = () => {
   };
 
   const onScanError = (error: any) => {
-    if (!error.includes('NotFoundException')) {
+    if (! error.includes('NotFoundException')) {
       console.error('QR scan error:', error);
     }
   };
@@ -715,12 +831,12 @@ const WarehouseCheckIn: React.FC = () => {
   const processQrCodeCheckIn = (qrCode: string) => {
     const warehouse = availableWarehouses.find(w => w.backup_code === qrCode);
 
-    if (!warehouse) {
+    if (! warehouse) {
       
       if (availableWarehouses.length === 0) {
-        showError('Errore Database', 'Nessun magazzino caricato dal database! Verifica connessione e permessi.');
+        showError('Errore Database', 'Nessun magazzino caricato dal database!  Verifica connessione e permessi.');
       } else {
-        showError('Codice Backup Non Riconosciuto', `Il codice backup "${qrCode}" non corrisponde a nessun magazzino registrato. Verifica di aver inserito il codice corretto.`);
+        showError('Codice Backup Non Riconosciuto', `Il codice backup "${qrCode}" non corrisponde a nessun magazzino registrato.  Verifica di aver inserito il codice corretto.`);
       }
       return;
     }
@@ -755,7 +871,7 @@ const WarehouseCheckIn: React.FC = () => {
     // Rivalidazione finale prima del check-in
     const validation = validateShiftTiming(selectedShift);
     if (!validation.isValid || !validation.canCheckIn) {
-      showError('Check-in Non Valido', `Impossibile procedere: ${validation.reason}`);
+      showError('Check-in Non Valido', `Impossibile procedere:  ${validation.reason}`);
       return;
     }
 
@@ -764,14 +880,14 @@ const WarehouseCheckIn: React.FC = () => {
     const today = toLocalDateString(now);
 
     // Controlla se esiste già un check-in per questo turno oggi
-    const existingShiftCheckIn = todayCheckIns.find((ci: any) => {
+    const existingShiftCheckIn = todayCheckIns.find((ci:  any) => {
       const ciDate = ci.date;
-      const shiftDate = selectedShift.data_turno.split('T')[0];
+      const shiftDate = selectedShift.data_turno. split('T')[0];
       return ci.shift_id === selectedShift.turno_id && ciDate === shiftDate;
     });
 
     if (existingShiftCheckIn) {
-      showError('Check-in Duplicato', 'Hai già effettuato il check-in per questo turno oggi. Verifica lo storico dei tuoi check-in.');
+      showError('Check-in Duplicato', 'Hai già effettuato il check-in per questo turno oggi.  Verifica lo storico dei tuoi check-in.');
       return;
     }
 
@@ -781,9 +897,9 @@ const WarehouseCheckIn: React.FC = () => {
 
       // Validazione posizione rispetto al magazzino
       let locationAlert = false;
-      let distanceFromWarehouse: number | null = null;
+      let distanceFromWarehouse:  number | null = null;
 
-      if (location && !forcedCheckIn) {
+      if (location && ! forcedCheckIn) {
         const validation = await validateLocationProximity(
           location.latitude,
           location.longitude,
@@ -792,11 +908,11 @@ const WarehouseCheckIn: React.FC = () => {
         );
 
         distanceFromWarehouse = validation.distance;
-        locationAlert = validation.alert;
+        locationAlert = validation. alert;
 
         if (locationAlert) {
-          console.warn('🚨 ALERT: Check-in effettuato lontano dal magazzino!', {
-            distance: Math.round(validation.distance!),
+          console.warn('🚨 ALERT: Check-in effettuato lontano dal magazzino! ', {
+            distance: Math.round(validation.distance! ),
             warehouse: warehouse.name
           });
         }
@@ -808,12 +924,12 @@ const WarehouseCheckIn: React.FC = () => {
         date: today,
         check_in_time: checkInTime,
         status: 'active',
-        location: location ? {
+        location: location ?  {
           latitude: location.latitude,
           longitude: location.longitude,
           address: location.address,
           accuracy: location.accuracy,
-          timestamp: location.timestamp.toISOString()
+          timestamp: location.timestamp. toISOString()
         } : null,
         forced_checkin: forcedCheckIn,
         gps_error_reason: gpsErrorReason,
@@ -836,7 +952,7 @@ const WarehouseCheckIn: React.FC = () => {
           .single();
 
         if (error) {
-          console.error('❌ ERRORE CHECK-IN WAREHOUSE:', error);
+          console. error('❌ ERRORE CHECK-IN WAREHOUSE:', error);
           console.error('   - Code:', error.code);
           console.error('   - Message:', error.message);
           console.error('   - Details:', error.details);
@@ -849,7 +965,7 @@ const WarehouseCheckIn: React.FC = () => {
           // Calcola orario fine turno corretto
           const shiftEndTime = formatTime(selectedShift.ora_fine_turno);
           
-          console.log('✅ CHECK-IN WAREHOUSE SALVATO NEL DB:');
+          console.log('✅ CHECK-IN WAREHOUSE SALVATO NEL DB: ');
           console.log('   - ID check-in:', data.id);
           console.log('   - Crew ID:', data.crew_id);
           console.log('   - Warehouse ID:', data.warehouse_id);
@@ -863,11 +979,11 @@ const WarehouseCheckIn: React.FC = () => {
             checkInTime,
             scheduledEndTime: shiftEndTime,
             shiftName: `Turno ${selectedShift.nome_magazzino}`, // Nome turno completo
-            shiftStartTime: selectedShift.ora_inizio_turno,
+            shiftStartTime:  selectedShift.ora_inizio_turno,
             shiftEndTime: selectedShift.ora_fine_turno,
             hasLunchBreak: selectedShift.crew_template_turni?.pausa_pranzo !== false,
             hasCompanyMeal: wantsCompanyMeal,
-            hasMealVoucher: wantsMealVoucher,
+            hasMealVoucher:  wantsMealVoucher,
             breakTime: breakMinutes
           });
 
@@ -889,11 +1005,11 @@ const WarehouseCheckIn: React.FC = () => {
           }
 
           if (wantsCompanyMeal) {
-            confirmMessage += `🍽️ Pasto aziendale: €${mealBenefits?.pasto_aziendale_cost || 12.00}\n`;
+            confirmMessage += `🍽️ Pasto aziendale:  €${mealBenefits?.pasto_aziendale_cost || 12.00}\n`;
           }
 
           if (wantsMealVoucher) {
-            confirmMessage += `🎫 Buono pasto: €${mealBenefits?.buoni_pasto_value || 7.50}\n`;
+            confirmMessage += `🎫 Buono pasto: €${mealBenefits?. buoni_pasto_value || 7.50}\n`;
           }
 
           if (forcedCheckIn) {
@@ -904,6 +1020,8 @@ const WarehouseCheckIn: React.FC = () => {
 
           // Ricarica sessioni attive per mostrare il timer immediatamente
           await loadActiveSession();
+          // Carica subito lo stato pausa per mostrare i pulsanti
+          await loadBreakStatus();
         }
       } else {
         addOfflineData('checkin', checkInData);
@@ -916,7 +1034,7 @@ const WarehouseCheckIn: React.FC = () => {
       setWantsMealVoucher(false);
       
     } catch (error) {
-      showError('Errore Check-in', 'Si è verificato un errore durante il check-in. Riprova.');
+      showError('Errore Check-in', 'Si è verificato un errore durante il check-in.  Riprova.');
     }
   };
 
@@ -936,13 +1054,14 @@ const WarehouseCheckIn: React.FC = () => {
     console.log('🔴 INIZIO PROCESSO CHECK-OUT MANUALE');
     console.log('📋 Sessione corrente:', currentSession);
     console.log('⏱️ Tempo trascorso:', elapsedTime);
+    console.log('📝 Note checkout:', checkoutNotes);
 
     try {
-      showInfo('Check-out in corso...', 'Sto completando il turno magazzino', 2000);
+      showInfo('Check-out in corso... ', 'Sto completando il turno magazzino', 2000);
 
-      console.log('📞 Chiamata a manualCheckOut()...');
+      console.log('📞 Chiamata a manualCheckOut().. .');
       console.log('📍 Passaggio location al checkout:', currentLocation);
-      const success = await manualCheckOut(currentLocation);
+      const success = await manualCheckOut(currentLocation, checkoutNotes);
       console.log('✅ Risultato manualCheckOut():', success);
 
       if (success) {
@@ -952,15 +1071,15 @@ const WarehouseCheckIn: React.FC = () => {
         endSession();
         console.log('✅ Sessione locale terminata');
 
-        // Reset stati pausa
+        // Reset stati pausa e note
         setBreakInProgress(false);
         setBreakStartTime(null);
         setBreakEndTime(null);
-        setBreakStartLocation(null);
+        setCheckoutNotes('');
 
         showSuccess(
           'Check-out Completato',
-          `Turno magazzino terminato con successo! Tempo totale: ${elapsedTime}`
+          `Turno magazzino terminato con successo!  Tempo totale: ${elapsedTime}`
         );
 
         // Ricarica i dati dal database per aggiornare lo stato
@@ -979,6 +1098,14 @@ const WarehouseCheckIn: React.FC = () => {
           }
           console.log('🗑️ Cache pulita');
         }
+
+
+
+
+         // FORCE RELOAD della pagina dopo 1 secondo
+        setTimeout(() => {
+          window.location.reload();
+        }, 1000);
       } else {
         console.error('❌ Check-out FALLITO - success = false');
         showError('Errore Check-out', 'Si è verificato un errore durante il check-out. Riprova.');
@@ -1050,7 +1177,7 @@ const WarehouseCheckIn: React.FC = () => {
 
     try {
       const updateData: any = {
-        break_start_time: startTime,
+        pausa_pranzo_inizio: startTime,
         break_start_forced: forcedBreak
       };
 
@@ -1089,7 +1216,6 @@ const WarehouseCheckIn: React.FC = () => {
 
       setBreakInProgress(true);
       setBreakStartTime(startTime);
-      setBreakStartLocation(location);
 
       if (forcedBreak) {
         showWarning('Pausa Iniziata (Forzata)', `Inizio pausa registrato alle ${startTime} SENZA GPS`);
@@ -1143,7 +1269,7 @@ const WarehouseCheckIn: React.FC = () => {
 
     try {
       const updateData: any = {
-        break_end_time: endTime,
+        pausa_pranzo_fine: endTime,
         has_taken_break: true,
         break_registered_late: false,
         break_end_forced: forcedBreak
@@ -1163,6 +1289,9 @@ const WarehouseCheckIn: React.FC = () => {
       if (forcedBreak && gpsErrorReason) {
         updateData.break_end_gps_error = gpsErrorReason;
       }
+
+      console.log('💾 Dati fine pausa da salvare:', JSON.stringify(updateData, null, 2));
+      console.log('🎯 Update su ID:', currentSession.id);
 
       const { error } = await supabase
         .from('warehouse_checkins')
@@ -1196,6 +1325,57 @@ const WarehouseCheckIn: React.FC = () => {
     const [h2, m2] = endTime.split(':').map(Number);
     return (h2 * 60 + m2) - (h1 * 60 + m1);
   };
+
+  // Salva note turno durante il turno attivo
+  const saveNoteTurno = async () => {
+    if (!currentSession || currentSession.type !== 'warehouse') return;
+
+    try {
+      const { error } = await supabase
+        .from('warehouse_checkins')
+        .update({ NoteTurno: noteTurno || null })
+        .eq('id', currentSession.id);
+
+      if (error) {
+        console.error('Errore salvataggio note:', error);
+        showError('Errore', 'Impossibile salvare le note');
+        return;
+      }
+
+      showSuccess('Note Salvate', 'Le tue note sono state salvate con successo', 2000);
+    } catch (error) {
+      console.error('Errore sistema salvataggio note:', error);
+      showError('Errore Sistema', 'Errore durante il salvataggio delle note');
+    }
+  };
+
+  // Carica note turno quando si carica la sessione
+  const loadNoteTurno = async () => {
+    if (!currentSession || currentSession.type !== 'warehouse') return;
+
+    try {
+      const { data, error } = await supabase
+        .from('warehouse_checkins')
+        .select('NoteTurno')
+        .eq('id', currentSession.id)
+        .maybeSingle();
+
+      if (error || !data) return;
+
+      setNoteTurno(data.NoteTurno || '');
+    } catch (error) {
+      console.error('Errore caricamento note:', error);
+    }
+  };
+
+  // Carica note quando cambia la sessione
+  useEffect(() => {
+    if (currentSession?.type === 'warehouse') {
+      loadNoteTurno();
+    } else {
+      setNoteTurno('');
+    }
+  }, [currentSession?.id]);
 
   // Calcola distanza tra due coordinate GPS (formula Haversine)
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
@@ -1331,25 +1511,6 @@ const WarehouseCheckIn: React.FC = () => {
     return '09:00';
   };
 
-  const getEventTypeIcon = (assignment: EventAssignment) => {
-    if (assignment.nome_evento.toLowerCase().includes('magazzino')) {
-      return Building2;
-    }
-    if (assignment.evento_trasferta) {
-      return Plane;
-    }
-    return CalendarIcon;
-  };
-
-  const getEventTypeColor = (assignment: EventAssignment) => {
-    if (assignment.nome_evento.toLowerCase().includes('magazzino')) {
-      return 'from-gray-500 to-gray-600';
-    }
-    if (assignment.evento_trasferta) {
-      return 'from-purple-500 to-pink-500';
-    }
-    return 'from-blue-500 to-cyan-500';
-  };
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
@@ -1363,8 +1524,8 @@ const WarehouseCheckIn: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Active Check-in Warning */}
-      {existingCheckIn && existingCheckIn.status === 'active' && (
+      {/* Active Check-in Warning - SOLO se c'è un check-in nel DB ma NON c'è una sessione locale attiva */}
+      {existingCheckIn && existingCheckIn.status === 'active' && !currentSession && (
         <div className="bg-orange-900 rounded-xl p-4 border border-orange-700">
           <div className="flex items-center space-x-3">
             <AlertCircle className="h-5 w-5 text-orange-400" />
@@ -1374,7 +1535,7 @@ const WarehouseCheckIn: React.FC = () => {
                 Check-in attivo dalle {existingCheckIn.check_in_time} - {existingCheckIn.nome_turno || 'Turno Magazzino'}
               </p>
               <p className="text-xs text-orange-300 mt-1">
-                Completa questo turno prima di iniziarne un altro
+                Caricamento sessione in corso...
               </p>
             </div>
           </div>
@@ -1382,7 +1543,7 @@ const WarehouseCheckIn: React.FC = () => {
       )}
 
       {/* Active Sessions Display - Multiple Sessions Support */}
-      {activeSessions.filter(s => s.type === 'warehouse').length > 0 && (
+      {(currentSession?.type === 'warehouse' || activeSessions.filter(s => s.type === 'warehouse').length > 0) && (
         <div className="bg-gradient-to-br from-purple-600 to-pink-600 rounded-2xl p-6 shadow-xl">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xl font-bold text-white">
@@ -1441,7 +1602,7 @@ const WarehouseCheckIn: React.FC = () => {
                     <div className="space-y-1">
                       {session.hasCompanyMeal && (
                         <div className="flex justify-between text-sm">
-                          <span className="text-purple-200">🍽️ Pasto Aziendale:</span>
+                          <span className="text-purple-200">Pasto Aziendale:</span>
                           <span className="text-orange-300 font-medium">-€{mealBenefits?.pasto_aziendale_cost || 12.00}</span>
                         </div>
                       )}
@@ -1467,33 +1628,73 @@ const WarehouseCheckIn: React.FC = () => {
             )}
           </div>
 
+          {/* Note Turno - Sempre modificabili durante il turno */}
+          {currentSession && currentSession.type === 'warehouse' && (
+            <div className="bg-gradient-to-r from-blue-900 to-indigo-900 rounded-xl p-4 border border-blue-700 shadow-lg mt-4">
+              <div className="flex items-center space-x-2 mb-3">
+                <div className="bg-blue-600 p-2 rounded-lg">
+                  <svg className="h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </div>
+                <h5 className="text-white font-bold text-lg">📝 Note Turno</h5>
+              </div>
+              <textarea
+                value={noteTurno}
+                onChange={(e) => setNoteTurno(e.target.value)}
+                placeholder="Scrivi qui eventuali note, osservazioni o segnalazioni durante il turno..."
+                className="w-full bg-gray-800 bg-opacity-50 text-white border-2 border-blue-600 rounded-lg p-3 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400 min-h-[100px] placeholder-gray-400 transition-all"
+                maxLength={500}
+              />
+              <div className="flex items-center justify-between mt-2">
+                <p className="text-blue-200 text-xs">
+                  {noteTurno.length}/500 caratteri
+                </p>
+                <button
+                  onClick={saveNoteTurno}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 shadow-md"
+                >
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span>Salva Note</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Mantieni la gestione pausa solo se c'è una sessione warehouse attiva */}
           {currentSession && currentSession.type === 'warehouse' && currentSession.hasLunchBreak && (
             <div className="space-y-4 mt-4">
               {/* Break Management */}
-              <div className="bg-white bg-opacity-10 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h5 className="text-white font-medium flex items-center space-x-2">
-                    <Coffee className="h-5 w-5" />
-                    <span>Gestione Pausa Pranzo</span>
-                  </h5>
-                  <div className={`flex items-center space-x-1 px-2 py-1 rounded-full text-xs ${
-                    gpsLoading ? 'bg-yellow-600' : currentLocation ? 'bg-green-600' : 'bg-red-600'
+              <div className="bg-gradient-to-br from-orange-900/40 to-amber-900/40 backdrop-blur-sm rounded-xl p-5 shadow-2xl border border-orange-700/50">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center space-x-3">
+                    <div className="bg-gradient-to-br from-orange-500 to-amber-600 p-2.5 rounded-xl shadow-lg">
+                      <Coffee className="h-6 w-6 text-white" />
+                    </div>
+                    <div>
+                      <h5 className="text-white font-bold text-lg">Pausa Pranzo</h5>
+                      <p className="text-orange-200 text-xs">Gestisci la tua pausa</p>
+                    </div>
+                  </div>
+                  <div className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-full text-xs font-semibold shadow-md ${
+                    gpsLoading ? 'bg-yellow-500' : currentLocation ? 'bg-green-500' : 'bg-red-500'
                   }`}>
                     {gpsLoading ? (
                       <>
-                        <div className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></div>
-                        <span className="text-white">GPS...</span>
+                        <div className="animate-spin h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full"></div>
+                        <span className="text-white">Rilevamento...</span>
                       </>
                     ) : currentLocation ? (
                       <>
-                        <MapPin className="h-3 w-3 text-white" />
-                        <span className="text-white">GPS OK</span>
+                        <MapPin className="h-3.5 w-3.5 text-white animate-pulse" />
+                        <span className="text-white">GPS Attivo</span>
                       </>
                     ) : (
                       <>
-                        <MapPin className="h-3 w-3 text-white" />
-                        <span className="text-white">NO GPS</span>
+                        <MapPin className="h-3.5 w-3.5 text-white" />
+                        <span className="text-white">GPS Off</span>
                       </>
                     )}
                   </div>
@@ -1504,60 +1705,65 @@ const WarehouseCheckIn: React.FC = () => {
                     <button
                       onClick={() => handleStartBreak(false)}
                       disabled={gpsLoading}
-                      className="w-full bg-orange-500 hover:bg-orange-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white py-3 px-4 rounded-lg font-medium flex items-center justify-center space-x-2 transition-colors"
+                      className="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white py-4 px-5 rounded-xl font-bold text-base flex items-center justify-center space-x-2.5 transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
                     >
-                      <Coffee className="h-5 w-5" />
+                      <Coffee className="h-6 w-6" />
                       <span>
-                        {gpsLoading ? 'Verifica GPS...' : currentLocation ? '☕ INIZIA PAUSA' : '☕ INIZIA PAUSA (GPS richiesto)'}
+                        {gpsLoading ? 'Verifica GPS in corso...' : currentLocation ? '☕ INIZIA PAUSA PRANZO' : '☕ INIZIA PAUSA (Richiedi GPS)'}
                       </span>
                     </button>
                     {!currentLocation && !gpsLoading && (
-                      <div className="mt-2 bg-yellow-900/30 border border-yellow-600 rounded-lg p-3">
-                        <p className="text-yellow-200 text-xs text-center">
-                          ⚠️ GPS non disponibile. Cliccando il pulsante sopra verrai chiesto di attivare il GPS o di forzare la pausa.
+                      <div className="mt-3 bg-gradient-to-r from-yellow-900/50 to-amber-900/50 border-2 border-yellow-500/50 rounded-xl p-4 backdrop-blur-sm">
+                        <p className="text-yellow-100 text-sm text-center flex items-center justify-center space-x-2">
+                          <AlertCircle className="h-5 w-5 text-yellow-300 flex-shrink-0" />
+                          <span>GPS non disponibile. Verrà richiesta l'attivazione o la pausa forzata.</span>
                         </p>
                       </div>
                     )}
                   </>
                 ) : breakInProgress ? (
-                  <div className="space-y-3">
-                    <div className="bg-orange-500 bg-opacity-30 border-2 border-orange-400 rounded-lg p-3">
-                      <div className="flex items-center justify-center space-x-2 mb-2">
-                        <div className="w-3 h-3 bg-orange-400 rounded-full animate-pulse"></div>
-                        <span className="text-white font-bold">PAUSA IN CORSO</span>
+                  <div className="space-y-4">
+                    <div className="bg-gradient-to-br from-orange-500/30 to-amber-500/30 border-2 border-orange-400 rounded-xl p-4 shadow-lg backdrop-blur-sm">
+                      <div className="flex items-center justify-center space-x-2.5 mb-3">
+                        <div className="relative">
+                          <div className="w-4 h-4 bg-orange-400 rounded-full animate-pulse"></div>
+                          <div className="absolute inset-0 w-4 h-4 bg-orange-400 rounded-full animate-ping"></div>
+                        </div>
+                        <span className="text-white font-bold text-lg">🍽️ PAUSA IN CORSO</span>
                       </div>
-                      <p className="text-center text-sm text-orange-100">
-                        Iniziata alle {breakStartTime}
+                      <p className="text-center text-sm text-orange-100 font-medium">
+                        ⏰ Iniziata alle <span className="text-white font-bold">{breakStartTime}</span>
                       </p>
                     </div>
 
                     <button
                       onClick={() => handleEndBreak(false)}
                       disabled={gpsLoading}
-                      className="w-full bg-green-500 hover:bg-green-600 disabled:bg-gray-600 disabled:cursor-not-allowed text-white py-3 px-4 rounded-lg font-medium flex items-center justify-center space-x-2 transition-colors"
+                      className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white py-4 px-5 rounded-xl font-bold text-base flex items-center justify-center space-x-2.5 transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
                     >
-                      <CheckCircle className="h-5 w-5" />
+                      <CheckCircle className="h-6 w-6" />
                       <span>
-                        {gpsLoading ? 'Verifica GPS...' : currentLocation ? '✅ TERMINA PAUSA' : '✅ TERMINA PAUSA (GPS richiesto)'}
+                        {gpsLoading ? 'Verifica GPS in corso...' : currentLocation ? '✅ TERMINA PAUSA PRANZO' : '✅ TERMINA PAUSA (Richiedi GPS)'}
                       </span>
                     </button>
                     {!currentLocation && !gpsLoading && (
-                      <div className="mt-2 bg-yellow-900/30 border border-yellow-600 rounded-lg p-3">
-                        <p className="text-yellow-200 text-xs text-center">
-                          ⚠️ GPS non disponibile. Cliccando il pulsante sopra verrai chiesto di attivare il GPS o di forzare la pausa.
+                      <div className="bg-gradient-to-r from-yellow-900/50 to-amber-900/50 border-2 border-yellow-500/50 rounded-xl p-4 backdrop-blur-sm">
+                        <p className="text-yellow-100 text-sm text-center flex items-center justify-center space-x-2">
+                          <AlertCircle className="h-5 w-5 text-yellow-300 flex-shrink-0" />
+                          <span>GPS non disponibile. Verrà richiesta l'attivazione o la pausa forzata.</span>
                         </p>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <div className="bg-green-500 bg-opacity-20 border border-green-400 rounded-lg p-3">
-                    <div className="flex items-center justify-center space-x-2 mb-2">
-                      <CheckCircle className="h-5 w-5 text-green-400" />
-                      <span className="text-white font-bold">✅ Pausa Pranzo Effettuata</span>
+                  <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-2 border-green-400 rounded-xl p-4 shadow-lg backdrop-blur-sm">
+                    <div className="flex items-center justify-center space-x-2.5 mb-2">
+                      <CheckCircle className="h-6 w-6 text-green-300 animate-bounce" />
+                      <span className="text-white font-bold text-lg">✅ Pausa Completata</span>
                     </div>
                     {breakStartTime && breakEndTime && (
-                      <p className="text-center text-sm text-green-100">
-                        Dalle {breakStartTime} alle {breakEndTime}
+                      <p className="text-center text-sm text-green-100 font-medium">
+                        🕐 Dalle <span className="text-white font-bold">{breakStartTime}</span> alle <span className="text-white font-bold">{breakEndTime}</span>
                       </p>
                     )}
                   </div>
@@ -1681,7 +1887,7 @@ const WarehouseCheckIn: React.FC = () => {
                       <div className="flex items-center space-x-3 mb-2">
                         <Building2 className="h-5 w-5 text-purple-400" />
                         <div className="flex-1">
-                          <h4 className="font-medium text-white">{shift.nome_turno || `Turno ${shift.nome_magazzino}`}</h4>
+                          <h4 className="font-medium text-white">Turno {shift.nome_magazzino}</h4>
                           <p className="text-xs text-purple-300 font-medium">📍 {shift.nome_magazzino}</p>
                           <p className="text-sm text-gray-300">{formatTime(shift.ora_inizio_turno)} - {formatTime(shift.ora_fine_turno)}</p>
                         </div>
@@ -1697,7 +1903,7 @@ const WarehouseCheckIn: React.FC = () => {
                           </span>
                         )}
                         {validation.isValid && (
-                          <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">✅ Turno attivo</span>
+                          <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">Turno attivo</span>
                         )}
                       </div>
 
@@ -2262,70 +2468,147 @@ const WarehouseCheckIn: React.FC = () => {
 
       {/* Modal Conferma Check-out */}
       {showCheckOutConfirmModal && currentSession && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl max-w-md w-full p-6 border border-red-500">
-            <div className="flex items-center space-x-3 mb-4">
-              <div className="bg-red-900 p-3 rounded-full">
-                <AlertCircle className="h-6 w-6 text-red-400" />
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-75 z-50 p-4"
+          onTouchMove={handleDragMove}
+          onTouchEnd={handleDragEnd}
+          onMouseMove={handleDragMove}
+          onMouseUp={handleDragEnd}
+        >
+          <div 
+            className="bg-gray-800 rounded-xl max-w-md w-full p-4 border border-red-500 max-h-[85vh] overflow-y-auto absolute"
+            style={{
+              left: modalPosition.x ? `${modalPosition.x}px` : '50%',
+              top: modalPosition.y ? `${modalPosition.y}px` : '50%',
+              transform: modalPosition.x ? 'none' : 'translate(-50%, -50%)',
+              cursor: isDragging ? 'grabbing' : 'default'
+            }}
+          >
+            <div 
+              className="flex items-center space-x-2 mb-3 cursor-grab active:cursor-grabbing select-none"
+              onTouchStart={handleDragStart}
+              onMouseDown={handleDragStart}
+            >
+              <div className="bg-red-900 p-2 rounded-full">
+                <AlertCircle className="h-5 w-5 text-red-400" />
               </div>
-              <h3 className="text-xl font-bold text-white">Conferma Check-out</h3>
+              <h3 className="text-lg font-bold text-white flex-1">Conferma Check-out</h3>
+              <div className="text-gray-400 text-xs flex items-center space-x-1">
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
+                </svg>
+                <span>Trascina</span>
+              </div>
             </div>
 
-            <div className="space-y-4 mb-6">
-              <div className="bg-red-900/20 border border-red-700 rounded-lg p-4">
-                <p className="text-red-300 text-sm mb-2">
-                  <strong>Stai per terminare il turno magazzino</strong>
-                </p>
-                <p className="text-red-200 text-xs">
-                  Questa azione registrerà il check-out e chiuderà definitivamente la sessione corrente. Assicurati di aver completato tutte le attività.
-                </p>
-              </div>
-
-              <div className="bg-gray-700 rounded-lg p-4">
-                <h4 className="text-white font-medium mb-3">Riepilogo Turno:</h4>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
+            <div className="space-y-3 mb-4">
+              <div className="bg-gray-700 rounded-lg p-3">
+                <div className="space-y-1.5 text-sm">
+                  <div className="flex justify-between items-start">
                     <span className="text-gray-400">Turno:</span>
-                    <span className="text-white font-medium">{currentSession.shiftName}</span>
+                    <span className="text-white font-medium text-xs text-right ml-2">{currentSession.shiftName}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-400">Check-in:</span>
                     <span className="text-white">{formatTime(currentSession.checkInTime)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Tempo lavorato:</span>
+                    <span className="text-gray-400">Tempo:</span>
                     <span className="text-white font-medium">{elapsedTime}</span>
                   </div>
                   {currentSession.hasLunchBreak && (
                     <div className="flex justify-between">
-                      <span className="text-gray-400">Pausa pranzo:</span>
-                      <span className="text-white">
-                        {breakInProgress ? '⏸️ In corso' : breakStartTime ? '✅ Completata' : '⚠️ Non registrata'}
+                      <span className="text-gray-400">Pausa:</span>
+                      <span className="text-white text-xs">
+                        {breakInProgress ? '⏸️ In corso' : breakStartTime ? '✅ Fatta' : '⚠️ Non fatta'}
                       </span>
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="bg-yellow-900/20 border border-yellow-700 rounded-lg p-3">
-                <p className="text-yellow-300 text-xs">
-                  ⚠️ Dopo il check-out non potrai più modificare questo turno. Verifica che tutti i dati siano corretti.
+              {/* Note Turno inserite DURANTE il turno (readonly) */}
+              {noteTurno && (
+                <div className="bg-gradient-to-r from-blue-900/50 to-indigo-900/50 rounded-lg p-3 border border-blue-600">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-blue-200 font-medium text-sm flex items-center space-x-2">
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                      <span>📝 Note scritte durante il turno:</span>
+                    </label>
+                    <button
+                      onClick={() => setNoteTurnoExpanded(!noteTurnoExpanded)}
+                      className="text-blue-300 text-xs px-2 py-1 bg-blue-800/50 rounded hover:bg-blue-700/50 transition-colors flex items-center space-x-1"
+                    >
+                      <span>{noteTurnoExpanded ? 'Comprimi' : 'Espandi'}</span>
+                      <svg className={`h-3 w-3 transition-transform ${noteTurnoExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className={`bg-gray-800/70 text-blue-100 border border-blue-700 rounded-lg p-2.5 text-sm italic whitespace-pre-wrap transition-all overflow-hidden ${
+                    noteTurnoExpanded ? 'max-h-[400px] overflow-y-auto' : 'max-h-[80px]'
+                  }`}>
+                    {noteTurno}
+                  </div>
+                  {!noteTurnoExpanded && noteTurno.length > 100 && (
+                    <div className="text-blue-400 text-xs mt-1 italic">... clicca "Espandi" per vedere tutto</div>
+                  )}
+                  <p className="text-blue-300 text-xs mt-1.5 italic">
+                    ✓ Queste note sono state salvate in NoteTurno
+                  </p>
+                </div>
+              )}
+
+              {/* Note Checkout - Nuove note di fine turno */}
+              <div className="bg-gradient-to-r from-gray-700 to-gray-800 rounded-lg p-3 border border-gray-600">
+                <label className="block text-white font-medium mb-1.5 text-sm flex items-center space-x-2">
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <span>🏁 Vuoi aggiungere note di fine turno?</span>
+                </label>
+                <p className="text-gray-400 text-xs mb-2">
+                  {noteTurno 
+                    ? 'Puoi aggiungere ulteriori osservazioni finali, problemi o consegne' 
+                    : 'Aggiungi eventuali osservazioni, problemi riscontrati o consegne da fare'}
                 </p>
+                <textarea
+                  value={checkoutNotes}
+                  onChange={(e) => setCheckoutNotes(e.target.value)}
+                  placeholder={noteTurno 
+                    ? "Note aggiuntive di fine turno (opzionali)..." 
+                    : "Note di fine turno (opzionali)..."}
+                  className="w-full bg-gray-900 text-white border-2 border-gray-600 rounded-lg p-2.5 text-sm focus:outline-none focus:border-green-500 focus:ring-2 focus:ring-green-500 min-h-[80px] placeholder-gray-500 transition-all"
+                  maxLength={500}
+                />
+                <div className="flex items-center justify-between mt-1.5">
+                  <p className="text-gray-400 text-xs italic">
+                    {checkoutNotes.length > 0 ? '✓ Salvate in "notes" al checkout' : 'Facoltative'}
+                  </p>
+                  <p className="text-gray-400 text-xs">
+                    {checkoutNotes.length}/500
+                  </p>
+                </div>
               </div>
             </div>
 
-            <div className="flex space-x-3">
+            <div className="flex space-x-2">
               <button
-                onClick={() => setShowCheckOutConfirmModal(false)}
-                className="flex-1 bg-gray-700 text-white py-3 px-4 rounded-lg hover:bg-gray-600 font-medium"
+                onClick={() => {
+                  setShowCheckOutConfirmModal(false);
+                  setCheckoutNotes('');
+                }}
+                className="flex-1 bg-gray-700 text-white py-2.5 px-3 rounded-lg hover:bg-gray-600 font-medium text-sm"
               >
                 Annulla
               </button>
               <button
                 onClick={confirmCheckOut}
-                className="flex-1 bg-red-600 text-white py-3 px-4 rounded-lg hover:bg-red-700 font-medium"
+                className="flex-1 bg-red-600 text-white py-2.5 px-3 rounded-lg hover:bg-red-700 font-medium text-sm"
               >
-                Conferma Check-out
+                Conferma
               </button>
             </div>
           </div>
