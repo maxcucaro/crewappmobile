@@ -259,8 +259,9 @@ export const usePersistentTimer = () => {
         }
       }
 
-      // Cerca timesheet evento attivo
-      const { data: eventTimesheet, error: eventError } = await supabase
+      // Cerca timesheet eventi attivi (status 'submitted' o 'draft' senza end_time)
+      // Supporta MULTIPLI eventi attivi contemporaneamente (assegnati + autoassegnati)
+      const { data: eventTimesheets, error: eventError } = await supabase
         .from('timesheet_entries')
         .select(`
           *,
@@ -268,32 +269,51 @@ export const usePersistentTimer = () => {
         `)
         .eq('crew_id', user?.id)
         .eq('date', today)
-        .eq('status', 'draft')
-        .is('end_time', null)
-        .maybeSingle();
+        .in('status', ['draft', 'submitted'])
+        .is('end_time', null);
 
-      if (!eventError && eventTimesheet) {
-        const eventData = eventTimesheet.crew_events as any;
-        const session: CheckInSession = {
-          id: eventTimesheet.id,
-          type: 'event',
-          eventId: eventTimesheet.event_id,
-          checkInTime: eventTimesheet.start_time,
-          scheduledEndTime: '17:00',
-          shiftName: eventData?.title || 'Evento',
-          hasCompanyMeal: eventTimesheet.company_meal || false,
-          hasMealVoucher: eventTimesheet.meal_voucher || false,
-          isActive: true
-        };
+      if (!eventError && eventTimesheets && eventTimesheets.length > 0) {
+        console.log('📅 Eventi attivi trovati:', eventTimesheets.length);
+        
+        eventTimesheets.forEach((eventTimesheet) => {
+          const eventData = eventTimesheet.crew_events as any;
+          const session: CheckInSession = {
+            id: eventTimesheet.id,
+            type: 'event',
+            eventId: eventTimesheet.event_id,
+            checkInTime: eventTimesheet.start_time,
+            scheduledEndTime: '17:00',
+            shiftName: eventData?.title || 'Evento',
+            hasCompanyMeal: eventTimesheet.company_meal || false,
+            hasMealVoucher: eventTimesheet.meal_voucher || false,
+            isActive: true
+          };
 
-        allSessions.push(session);
+          allSessions.push(session);
+          console.log('📅 Sessione evento aggiunta:', session.shiftName, 'ID:', session.id);
+        });
 
-        if (!warehouseCheckIn) {
-          setCurrentSession(session);
+        // Imposta come currentSession il primo evento se non c'è un check-in magazzino
+        if (!warehouseCheckIn && eventTimesheets.length > 0) {
+          const firstEvent = eventTimesheets[0];
+          const eventData = firstEvent.crew_events as any;
+          setCurrentSession({
+            id: firstEvent.id,
+            type: 'event',
+            eventId: firstEvent.event_id,
+            checkInTime: firstEvent.start_time,
+            scheduledEndTime: '17:00',
+            shiftName: eventData?.title || 'Evento',
+            hasCompanyMeal: firstEvent.company_meal || false,
+            hasMealVoucher: firstEvent.meal_voucher || false,
+            isActive: true
+          });
         }
       }
 
       setActiveSessions(allSessions);
+      
+      console.log('✅ Sessioni caricate:', allSessions.length, 'sessioni attive');
 
     } catch (error) {
       console.error('Errore caricamento sessioni:', error);
@@ -303,8 +323,25 @@ export const usePersistentTimer = () => {
   };
 
   const startSession = useCallback((sessionData: Omit<CheckInSession, 'isActive'>) => {
+    console.log('🚀 startSession chiamata con dati:', sessionData);
     const session = { ...sessionData, isActive: true };
+    console.log('📝 Sessione creata:', session);
+    
     setCurrentSession(session);
+    console.log('✅ setCurrentSession chiamata');
+    
+    // ✅ CORREZIONE: Aggiungi la sessione anche ad activeSessions per mostrare il timer
+    setActiveSessions(prev => {
+      console.log('📊 activeSessions precedente:', prev.length, 'sessioni');
+      // Evita duplicati: se la sessione esiste già, sostituiscila
+      const filtered = prev.filter(s => s.id !== session.id);
+      const newSessions = [...filtered, session];
+      console.log('📊 activeSessions aggiornato:', newSessions.length, 'sessioni');
+      console.log('📋 Nuove sessioni:', newSessions.map(s => ({ id: s.id, type: s.type, shiftName: s.shiftName })));
+      return newSessions;
+    });
+    
+    console.log('✅ Sessione avviata:', session.id, 'Type:', session.type);
     
     // Il timer si avvierà automaticamente tramite useEffect
   }, []);

@@ -13,7 +13,14 @@ const config: CapacitorConfig = {
     contentInset: 'automatic',
     backgroundColor: '#1a1a1a',
     // Limita l'app a iPhone (no iPad)
-    limitsNavigationsToAppBoundDomains: false
+    limitsNavigationsToAppBoundDomains: false,
+    // PWA ottimizzata per iOS
+    scrollEnabled: true,
+    allowsLinkPreview: false,
+    // Gestione orientamento
+    preferredContentMode: 'mobile',
+    // Permessi location sempre attivi
+    allowsBackForwardNavigationGestures: true
   },
   android: {
     allowMixedContent: true,

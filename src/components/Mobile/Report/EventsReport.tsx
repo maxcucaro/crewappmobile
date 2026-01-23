@@ -31,6 +31,7 @@ interface EventReport {
     end_time?: string;
     status: string;
     total_hours?: number;
+    break_time?: number;
     meal_voucher?: boolean;
     meal_voucher_amount?: number;
     company_meal?: boolean;
@@ -133,6 +134,7 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
       const startDate = toLocalDateStringForSQL(startDateObj);
       const endDate = toLocalDateStringForSQL(endDateObj);
 
+      // Query 1: Eventi con assegnazione normale
       const { data: eventsData, error: eventsError } = await supabase
         .from('crew_event_assegnazione')
         .select('*')
@@ -142,6 +144,92 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
         .order('giorno_inizio_evento', { ascending: true });
 
       if (eventsError) throw eventsError;
+
+      // Query 2: Eventi autoassegnati (solo timesheet con is_self_assigned=true)
+      const { data: selfAssignedTimesheets, error: selfAssignedError } = await supabase
+        .from('timesheet_entries')
+        .select(`
+          id,
+          event_id,
+          date,
+          start_time,
+          end_time,
+          total_hours,
+          break_time,
+          status,
+          meal_voucher,
+          meal_voucher_amount,
+          company_meal,
+          company_meal_cost,
+          diaria_type,
+          diaria_amount,
+          other_benefits_amount,
+          total_benefits,
+          benefits_breakdown,
+          is_rectified,
+          rectification_notes,
+          rectified_by,
+          rectified_at,
+          original_start_time,
+          original_end_time,
+          rectified_start_time,
+          rectified_end_time,
+          convocation_start_time,
+          convocation_end_time,
+          notedipendente
+        `)
+        .eq('crew_id', user?.id)
+        .eq('is_self_assigned', true)
+        .gte('date', startDate)
+        .lte('date', endDate);
+
+      if (selfAssignedError) throw selfAssignedError;
+
+      // Per ogni evento autoassegnato, carica i dettagli dell'evento
+      const selfAssignedEventIds = selfAssignedTimesheets?.map(t => t.event_id).filter(Boolean) || [];
+      let selfAssignedEventsData: any[] = [];
+      
+      if (selfAssignedEventIds.length > 0) {
+        const { data: eventsDetails, error: eventsDetailsError } = await supabase
+          .from('crew_events')
+          .select('*')
+          .in('id', selfAssignedEventIds);
+
+        if (eventsDetailsError) throw eventsDetailsError;
+
+        // Crea oggetti assegnazione "virtuali" per gli eventi autoassegnati
+        selfAssignedEventsData = selfAssignedTimesheets.map(timesheet => {
+          const eventDetails = eventsDetails?.find(e => e.id === timesheet.event_id);
+          if (!eventDetails) return null;
+
+          return {
+            id: `self-${timesheet.id}`, // ID virtuale per distinguere
+            evento_id: eventDetails.id,
+            dipendente_freelance_id: user?.id,
+            nome_evento: eventDetails.title,
+            nome_azienda: eventDetails.company_name || 'N/D',
+            giorno_inizio_evento: eventDetails.start_date,
+            giorno_fine_evento: eventDetails.end_date,
+            evento_localita: eventDetails.location || 'N/D',
+            evento_indirizzo: eventDetails.address,
+            evento_orario_convocazione: eventDetails.start_time,
+            evento_descrizione: eventDetails.description,
+            tariffa_evento_assegnata: 0,
+            bonus_previsti: 0,
+            evento_trasferta: false,
+            bonus_trasferta: false,
+            bonus_diaria: false,
+            benefits_evento_ids: [],
+            benefits_evento_nomi: [],
+            benefits_storicizzati: [],
+            is_self_assigned: true, // Flag per identificare
+            _timesheet: timesheet // Conserva il timesheet associato
+          };
+        }).filter(Boolean);
+      }
+
+      // Unisci le due liste
+      const allEventsData = [...(eventsData || []), ...selfAssignedEventsData];
 
       const { data: employeeRatesData, error: employeeRatesError } = await supabase
         .from('crew_assegnazionetariffa')
@@ -198,6 +286,7 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
           start_time,
           end_time,
           total_hours,
+          break_time,
           status,
           meal_voucher,
           meal_voucher_amount,
@@ -233,8 +322,9 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
 
       const reports: EventReport[] = [];
 
-      for (const assignment of eventsData || []) {
-        const timesheet = timesheetByEvent[assignment.evento_id];
+      for (const assignment of allEventsData || []) {
+        // Per gli eventi autoassegnati, usa il timesheet già presente
+        const timesheet = assignment.is_self_assigned ? assignment._timesheet : timesheetByEvent[assignment.evento_id];
         const applicableBenefits: any[] = [];
         const benefitBreakdown: any[] = [];
         let eventBenefitsAmount = 0;
@@ -351,6 +441,7 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
             end_time: timesheet.end_time,
             status: timesheet.status,
             total_hours: timesheet.total_hours,
+            break_time: timesheet.break_time,
             meal_voucher: timesheet.meal_voucher,
             meal_voucher_amount: timesheet.meal_voucher_amount,
             company_meal: timesheet.company_meal,
@@ -366,7 +457,8 @@ const EventsReport: React.FC<EventsReportProps> = ({ selectedMonth, selectedYear
             rectified_start_time: timesheet.rectified_start_time,
             rectified_end_time: timesheet.rectified_end_time,
             convocation_start_time: timesheet.convocation_start_time,
-            convocation_end_time: timesheet.convocation_end_time
+            convocation_end_time: timesheet.convocation_end_time,
+            notedipendente: timesheet.notedipendente
           } : undefined,
           applicableBenefits,
           totalBenefitsAmount: eventBenefitsAmount,

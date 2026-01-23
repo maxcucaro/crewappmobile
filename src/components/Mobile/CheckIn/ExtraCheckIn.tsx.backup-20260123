@@ -216,26 +216,10 @@ const ExtraCheckIn: React.FC = () => {
       }
     };
 
-    // Avvio automatico GPS all'ingresso nella schermata Extra Check-in
-    const initGPS = async () => {
-      if (cancelled) return;
-      try {
-        console.debug('ExtraCheckIn: Avvio automatico GPS...');
-        await getCurrentLocation({ requiredAccuracy: MIN_DESIRED_ACCURACY, maxRetries: 3 });
-        console.debug('ExtraCheckIn: GPS acquisito automaticamente');
-      } catch (err) {
-        console.warn('ExtraCheckIn: GPS automatico non riuscito (l\'utente può riprovare manualmente)', err);
-      }
-    };
-
     tryLoad();
-    initGPS(); // Avvio GPS in parallelo al caricamento sessione
 
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        tryLoad();
-        initGPS(); // Riprova GPS quando la tab diventa visibile
-      }
+      if (document.visibilityState === 'visible') tryLoad();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
 
@@ -879,22 +863,18 @@ const ExtraCheckIn: React.FC = () => {
           <p className="text-xs text-gray-400">Queste note verranno salvate nella colonna NoteTurno al check-out.</p>
         </div>
 
-        {/* Opzioni pasto - visibili solo PRIMA del check-in */}
-        {!currentSession && (
-          <div className="mt-4">
-            <p className="text-sm text-gray-300 font-medium mb-2">Benefit pasto (opzionali):</p>
-            <div className="flex items-center space-x-2">
-              <label className="flex items-center space-x-2">
-                <input type="checkbox" checked={wantsCompanyMeal} onChange={() => { setWantsCompanyMeal(!wantsCompanyMeal); if (!wantsCompanyMeal) setWantsMealVoucher(false); }} />
-                <span className="text-sm text-gray-300">Pasto aziendale</span>
-              </label>
-              <label className="flex items-center space-x-2">
-                <input type="checkbox" checked={wantsMealVoucher} onChange={() => { setWantsMealVoucher(!wantsMealVoucher); if (!wantsMealVoucher) setWantsCompanyMeal(false); }} />
-                <span className="text-sm text-gray-300">Buono pasto</span>
-              </label>
-            </div>
+        <div className="mt-4">
+          <div className="flex items-center space-x-2">
+            <label className="flex items-center space-x-2">
+              <input type="checkbox" checked={wantsCompanyMeal} onChange={() => { setWantsCompanyMeal(!wantsCompanyMeal); if (!wantsCompanyMeal) setWantsMealVoucher(false); }} />
+              <span className="text-sm text-gray-300">Pasto aziendale</span>
+            </label>
+            <label className="flex items-center space-x-2">
+              <input type="checkbox" checked={wantsMealVoucher} onChange={() => { setWantsMealVoucher(!wantsMealVoucher); if (!wantsMealVoucher) setWantsCompanyMeal(false); }} />
+              <span className="text-sm text-gray-300">Buono pasto</span>
+            </label>
           </div>
-        )}
+        </div>
 
         <div className="mt-4 flex space-x-2">
           <button
@@ -1006,34 +986,12 @@ const ExtraCheckIn: React.FC = () => {
       {/* Active session area */}
       {currentSession && currentSession.type === 'extra' && (
         <div className="bg-purple-900 rounded-xl p-4 border border-purple-700">
-          <div className="flex items-center justify-between mb-4">
-            <h4 className="text-white font-medium text-lg">Sessione Attiva — Turno Extra</h4>
-            <div className="bg-purple-800 px-4 py-3 rounded-lg border-2 border-purple-500">
-              <div className="text-white font-mono text-3xl font-bold">
-                { (currentSession && currentSession.id) ? (elapsedTimes[currentSession.id] || elapsedTime || '00:00:00') : (elapsedTime || '00:00:00') }
-              </div>
-              <div className="text-purple-300 text-xs text-center mt-1">Tempo Totale</div>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-white font-medium">Sessione Attiva — Turno Extra</h4>
+            <div className="text-white font-mono">
+              { (currentSession && currentSession.id) ? (elapsedTimes[currentSession.id] || elapsedTime || '00:00:00') : (elapsedTime || '00:00:00') }
             </div>
           </div>
-
-          {/* Info pasti selezionati (read-only) */}
-          {(wantsCompanyMeal || wantsMealVoucher) && (
-            <div className="mb-4 bg-purple-800 rounded-lg p-3 border border-purple-600">
-              <p className="text-sm text-purple-200 font-medium mb-2">🍽️ Benefit pasto attivati:</p>
-              <div className="flex space-x-3">
-                {wantsCompanyMeal && (
-                  <div className="bg-green-900 border border-green-600 rounded-md px-3 py-1.5 flex items-center space-x-2">
-                    <span className="text-green-300 text-sm">✓ Pasto aziendale</span>
-                  </div>
-                )}
-                {wantsMealVoucher && (
-                  <div className="bg-green-900 border border-green-600 rounded-md px-3 py-1.5 flex items-center space-x-2">
-                    <span className="text-green-300 text-sm">✓ Buono pasto</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           <div className="space-y-3">
             <div>

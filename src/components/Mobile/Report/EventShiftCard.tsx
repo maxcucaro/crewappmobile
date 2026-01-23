@@ -18,6 +18,7 @@ interface EventShiftCardProps {
       bonus_trasferta?: boolean;
       bonus_diaria?: boolean;
       benefits_evento_nomi?: string[];
+      is_self_assigned?: boolean;
     };
     timesheet?: {
       id: string;
@@ -25,6 +26,7 @@ interface EventShiftCardProps {
       end_time?: string;
       status: string;
       total_hours?: number;
+      break_time?: number;
       meal_voucher?: boolean;
       meal_voucher_amount?: number;
       company_meal?: boolean;
@@ -125,6 +127,11 @@ const EventShiftCard: React.FC<EventShiftCardProps> = ({ report, onRectify }) =>
         <div className="flex-1">
           <div className="flex items-center space-x-2 mb-1">
             <h4 className="font-bold text-white">{assignment.nome_evento}</h4>
+            {assignment.is_self_assigned && (
+              <span className="bg-purple-600 text-white text-xs px-2 py-0.5 rounded font-semibold">
+                AUTOASSEGNATO
+              </span>
+            )}
             {timesheet?.is_rectified && (
               <span className="bg-orange-600 text-white text-xs px-2 py-0.5 rounded font-semibold">
                 Rettificato
@@ -215,13 +222,21 @@ const EventShiftCard: React.FC<EventShiftCardProps> = ({ report, onRectify }) =>
             </div>
           </div>
           {timesheet?.total_hours && (
-            <div className="border-t border-gray-700 pt-2">
+            <div className="border-t border-gray-700 pt-2 space-y-1">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-400">Ore Totali:</span>
                 <span className="text-sm font-bold text-blue-400">
                   {formatHoursAsTime(timesheet.total_hours)}
                 </span>
               </div>
+              {timesheet.break_time && timesheet.break_time > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-400">Pausa:</span>
+                  <span className="text-sm font-bold text-amber-400">
+                    {timesheet.break_time} min
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </div>

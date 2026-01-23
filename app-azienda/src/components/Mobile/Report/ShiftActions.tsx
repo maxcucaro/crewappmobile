@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Clock, Edit, Save, X, AlertCircle, Coffee } from 'lucide-react';
-import { supabase } from '../../../utils/supabase';
-import { useCompanyAuth } from '../../../context/CompanyAuthContext';
+import { Edit, Save, X, AlertCircle, Coffee } from 'lucide-react';
+import { supabase } from '../../../lib/db';
+import { useAuth } from '../../../context/AuthContext';
 import { useToastContext } from '../../../context/ToastContext';
+import { toItalianTime } from '../../../utils/dateUtils';
 
 interface CompletedShift {
   id: string;
@@ -27,65 +28,49 @@ interface CompletedShift {
   rectified_check_out?: string;
   rectified_pausa_pranzo?: boolean;
   auto_checkout?: boolean;
-  // Note: when using the enriched view additional fields may be present (warehouse_name, notes, noteturno, ...)
   [key: string]: any;
 }
 
 interface ShiftActionsProps {
   shift: CompletedShift;
   onUpdate: () => void;
+  tableName?: 'warehouse_checkins' | 'extra_shifts_checkins';
 }
 
-// Funzione per estrarre l'orario da un timestamp
-const extractTime = (timestamp: string | null): string => {
-  if (!timestamp) return '';
-
-  // Se è già in formato HH:MM
-  if (/^\d{2}:\d{2}$/.test(timestamp)) {
-    return timestamp;
-  }
-
-  // Se è in formato HH:MM:SS
-  if (/^\d{2}:\d{2}:\d{2}$/.test(timestamp)) {
-    return timestamp.substring(0, 5);
-  }
-
-  // Se è un timestamp ISO
-  try {
-    const date = new Date(timestamp);
-    if (!isNaN(date.getTime())) {
-      return date.toLocaleTimeString('it-IT', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      });
-    }
-  } catch (e) {
-    console.error('Errore parsing timestamp:', e);
-  }
-
-  return '';
-};
-
-const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
-  const { user } = useCompanyAuth();
+const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate, tableName }) => {
+  const { user } = useAuth();
   const { showSuccess, showError } = useToastContext();
   const [isEditing, setIsEditing] = useState(false);
   const [editedCheckIn, setEditedCheckIn] = useState('');
   const [editedCheckOut, setEditedCheckOut] = useState('');
   const [breakStart, setBreakStart] = useState('');
   const [breakEnd, setBreakEnd] = useState('');
+  const [breakCenaStart, setBreakCenaStart] = useState('');
+  const [breakCenaEnd, setBreakCenaEnd] = useState('');
   const [rectificationNote, setRectificationNote] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showOvertimeWarning, setShowOvertimeWarning] = useState(false);
   const [requestOvertime, setRequestOvertime] = useState(false);
   const [hasOvertimeInContract, setHasOvertimeInContract] = useState(true);
+  
+  // Overtime request modal state
+  const [showOvertimeModal, setShowOvertimeModal] = useState(false);
+  const [overtimeHours, setOvertimeHours] = useState(0);
+  const [overtimeMinutes, setOvertimeMinutes] = useState(0);
+  const [overtimeNote, setOvertimeNote] = useState('');
+  const [submittingOvertime, setSubmittingOvertime] = useState(false);
+  const [maxOvertimeMinutes, setMaxOvertimeMinutes] = useState(0);
+  const [existingOvertimeRequest, setExistingOvertimeRequest] = useState<any>(null);
+  const [companyId, setCompanyId] = useState<string | null>(null);
 
   // Local copy of the enriched row (loaded from warehouse_checkins_enriched)
   const [shiftRow, setShiftRow] = useState<any>(null);
+  
+  // Note del turno (modificabili)
+  const [shiftNotes, setShiftNotes] = useState('');
 
-  const calculateHours = (checkIn: string, checkOut: string, pausaInizio?: string, pausaFine?: string): number => {
+  const calculateHours = (checkIn: string, checkOut: string, pausaInizio?: string, pausaFine?: string, pausaCenaInizio?: string, pausaCenaFine?: string): number => {
     if (!checkIn || !checkOut) return 0;
 
     const [inH, inM] = checkIn.split(':').map(Number);
@@ -94,7 +79,7 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
     const outMinutes = outH * 60 + outM;
     let hours = (outMinutes - inMinutes) / 60;
 
-    // Sottrai la durata della pausa se specificata
+    // Sottrai la durata della pausa pranzo se specificata
     if (pausaInizio && pausaFine) {
       const [pausaInH, pausaInM] = pausaInizio.split(':').map(Number);
       const [pausaFinH, pausaFinM] = pausaFine.split(':').map(Number);
@@ -107,13 +92,52 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
       }
     }
 
+    // Sottrai la durata della pausa cena se specificata
+    if (pausaCenaInizio && pausaCenaFine) {
+      const [pausaCenaInH, pausaCenaInM] = pausaCenaInizio.split(':').map(Number);
+      const [pausaCenaFinH, pausaCenaFinM] = pausaCenaFine.split(':').map(Number);
+      const pausaCenaInMinutes = pausaCenaInH * 60 + pausaCenaInM;
+      const pausaCenaFinMinutes = pausaCenaFinH * 60 + pausaCenaFinM;
+      const pausaCenaDuration = (pausaCenaFinMinutes - pausaCenaInMinutes) / 60;
+
+      if (pausaCenaDuration > 0) {
+        hours -= pausaCenaDuration;
+      }
+    }
+
     return hours;
   };
 
-  // Determine if this is an extra shift
-  const isExtraShift = !shift.turno_id || shift.turno_id === '' || shift.nome_turno === 'TURNO EXTRA';
+  // Converte ore decimali in formato HH:MM
+  const formatHoursAsTime = (decimalHours: number): string => {
+    const totalMinutes = Math.round(decimalHours * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+  };
 
-  // Carica i dati del turno (inclusi quelli rettificati se esistono)
+  // Utility: arrotonda i minuti per difetto a multipli di 30
+  const calculateRequestableMinutes = (minutes: number): number => {
+    return Math.floor(minutes / 30) * 30;
+  };
+
+  // Utility: formatta minuti in stringa "Xh Ymin"
+  const formatMinutesToHoursMinutes = (totalMinutes: number): string => {
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+
+    if (hours === 0 && minutes === 0) return '0min';
+    if (hours === 0) return `${minutes}min`;
+    if (minutes === 0) return `${hours}h`;
+    return `${hours}h ${minutes}min`;
+  };
+
+  // Determine if this is an extra shift
+  const isExtraShift = tableName
+    ? tableName === 'extra_shifts_checkins'
+    : (!shift.turno_id || shift.turno_id === '' || shift.nome_turno === 'TURNO EXTRA');
+
+  // Carica SEMPRE i dati del turno e richiesta straordinari (anche quando non è in editing)
   useEffect(() => {
     const loadShiftData = async () => {
       try {
@@ -134,12 +158,17 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
             const checkOutTime = shiftData.rectified_check_out_time || shiftData.check_out_time;
             const breakStartTime = shiftData.rectified_break_start || shiftData.break_start_time;
             const breakEndTime = shiftData.rectified_break_end || shiftData.break_end_time;
+            const breakCenaStartTime = shiftData.rectified_pausa_cena_inizio || shiftData.pausa_cena_inizio;
+            const breakCenaEndTime = shiftData.rectified_pausa_cena_fine || shiftData.pausa_cena_fine;
 
-            setEditedCheckIn(extractTime(checkInTime));
-            setEditedCheckOut(extractTime(checkOutTime));
+            setEditedCheckIn(toItalianTime(checkInTime));
+            setEditedCheckOut(toItalianTime(checkOutTime));
             setBreakStart(breakStartTime || '');
             setBreakEnd(breakEndTime || '');
+            setBreakCenaStart(breakCenaStartTime || '');
+            setBreakCenaEnd(breakCenaEndTime || '');
             setRectificationNote(shiftData.rectification_note || '');
+            setShiftNotes(shiftData.notes || '');
           }
         } else {
           // Warehouse shift - use the enriched view
@@ -155,25 +184,73 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
             setShiftRow(shiftData);
             const checkInTime = shiftData.rectified_check_in_time || shiftData.check_in_time;
             const checkOutTime = shiftData.rectified_check_out_time || shiftData.check_out_time;
-            const breakStartTime = shiftData.rectified_break_start || shiftData.break_start_time || shiftData.break_start;
-            const breakEndTime = shiftData.rectified_break_end || shiftData.break_end_time || shiftData.break_end;
+            const breakStartTime = shiftData.rectified_pausa_pranzo_inizio || shiftData.pausa_pranzo_inizio || shiftData.break_start_time || shiftData.break_start;
+            const breakEndTime = shiftData.rectified_pausa_pranzo_fine || shiftData.pausa_pranzo_fine || shiftData.break_end_time || shiftData.break_end;
+            const breakCenaStartTime = shiftData.rectified_pausa_cena_inizio || shiftData.pausa_cena_inizio;
+            const breakCenaEndTime = shiftData.rectified_pausa_cena_fine || shiftData.pausa_cena_fine;
 
-            setEditedCheckIn(extractTime(checkInTime));
-            setEditedCheckOut(extractTime(checkOutTime));
+            setEditedCheckIn(toItalianTime(checkInTime));
+            setEditedCheckOut(toItalianTime(checkOutTime));
             setBreakStart(breakStartTime || '');
             setBreakEnd(breakEndTime || '');
+            setBreakCenaStart(breakCenaStartTime || '');
+            setBreakCenaEnd(breakCenaEndTime || '');
             setRectificationNote(shiftData.rectification_note || '');
+            setShiftNotes(shiftData.notes || '');
           }
+        }
+        
+        // Carica company_id da crew_aziende o regaziendasoftware
+        if (user?.id) {
+          // Prova prima con crew_aziende
+          let { data: azienda } = await supabase
+            .from('crew_aziende')
+            .select('id')
+            .eq('auth_user_id', user.id)
+            .maybeSingle();
+          
+          // Se non trovata in crew_aziende, prova con regaziendasoftware
+          if (!azienda) {
+            const { data: regAzienda } = await supabase
+              .from('regaziendasoftware')
+              .select('id')
+              .eq('auth_user_id', user.id)
+              .maybeSingle();
+            
+            azienda = regAzienda;
+          }
+          
+          if (azienda?.id) {
+            setCompanyId(azienda.id);
+          }
+        }
+        
+        // Verifica se esiste già una richiesta straordinari per questo turno
+        const { data: existingRequest } = await supabase
+          .from('richieste_straordinari_v2')
+          .select('*')
+          .eq('warehouse_checkin_id', shift.id)
+          .maybeSingle();
+        
+        if (existingRequest) {
+          setExistingOvertimeRequest(existingRequest);
+          // Precompila i campi del modal con i dati esistenti
+          const hours = Math.floor(existingRequest.overtime_minutes / 60);
+          const minutes = existingRequest.overtime_minutes % 60;
+          setOvertimeHours(hours);
+          setOvertimeMinutes(minutes);
+          setOvertimeNote(existingRequest.note || '');
         }
       } catch (err) {
         console.error('Errore caricamento dati turno:', err);
       }
     };
 
-    if (isEditing && shift.id) {
+    // CARICA SEMPRE, non solo quando isEditing=true
+    if (shift.id) {
       loadShiftData();
     }
-  }, [isEditing, shift.id, isExtraShift]);
+  }, [shift.id, isExtraShift, user?.id]);
 
   // Per ora gli straordinari sono sempre abilitati
   // TODO: Implementare la verifica del contratto quando sarà disponibile la colonna overtime_eligible
@@ -184,25 +261,39 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
   // Controlla se le ore superano il turno previsto
   useEffect(() => {
     if (editedCheckIn && editedCheckOut) {
-      const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd);
+      const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd);
       const expectedHours = shift.ore_previste || 8;
 
       if (newHours > expectedHours) {
         setShowOvertimeWarning(true);
+        // Calcola i minuti straordinari arrotondati per difetto a multipli di 30
+        const overtimeHoursRaw = newHours - expectedHours;
+        const overtimeMinutesRaw = Math.round(overtimeHoursRaw * 60);
+        const requestableMinutes = calculateRequestableMinutes(overtimeMinutesRaw);
+        setMaxOvertimeMinutes(requestableMinutes);
+        
+        // Imposta valori iniziali per il form straordinari
+        const hours = Math.floor(requestableMinutes / 60);
+        const minutes = requestableMinutes % 60;
+        setOvertimeHours(hours);
+        setOvertimeMinutes(minutes);
       } else {
         setShowOvertimeWarning(false);
         setRequestOvertime(false);
+        setMaxOvertimeMinutes(0);
       }
     }
-  }, [editedCheckIn, editedCheckOut, breakStart, breakEnd, shift.ore_previste]);
+  }, [editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd, shift.ore_previste]);
 
   const handleSave = async () => {
-    console.log('🔍 Inizio salvataggio rettifica (azienda)...');
+    console.log('🔍 Inizio salvataggio rettifica...');
     console.log('📝 Dati da salvare:', {
       editedCheckIn,
       editedCheckOut,
       breakStart,
       breakEnd,
+      breakCenaStart,
+      breakCenaEnd,
       rectificationNote,
       requestOvertime,
       shiftId: shift.id
@@ -229,12 +320,27 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
       const [pausaInH, pausaInM] = breakStart.split(':').map(Number);
       const [pausaFinH, pausaFinM] = breakEnd.split(':').map(Number);
       if ((pausaFinH * 60 + pausaFinM) <= (pausaInH * 60 + pausaInM)) {
-        setError('La fine della pausa deve essere dopo l\'inizio');
+        setError('La fine della pausa pranzo deve essere dopo l\'inizio');
         return;
       }
     }
 
-    const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd);
+    // Valida pausa cena se specificata
+    if ((breakCenaStart && !breakCenaEnd) || (!breakCenaStart && breakCenaEnd)) {
+      setError('Specifica sia l\'inizio che la fine della pausa cena');
+      return;
+    }
+
+    if (breakCenaStart && breakCenaEnd) {
+      const [pausaCenaInH, pausaCenaInM] = breakCenaStart.split(':').map(Number);
+      const [pausaCenaFinH, pausaCenaFinM] = breakCenaEnd.split(':').map(Number);
+      if ((pausaCenaFinH * 60 + pausaCenaFinM) <= (pausaCenaInH * 60 + pausaCenaInM)) {
+        setError('La fine della pausa cena deve essere dopo l\'inizio');
+        return;
+      }
+    }
+
+    const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd);
     if (newHours <= 0) {
       setError('Le pause non possono coprire tutto il tempo di lavoro. Le ore effettive devono essere maggiori di zero.');
       return;
@@ -252,6 +358,10 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
         rectified_break_start: breakStart ? breakStart : null,
         rectified_break_end: breakEnd ? breakEnd : null,
         rectified_pausa_pranzo: (breakStart && breakEnd) ? true : false,
+        rectified_pausa_pranzo_inizio: breakStart ? breakStart : null,
+        rectified_pausa_pranzo_fine: breakEnd ? breakEnd : null,
+        rectified_pausa_cena_inizio: breakCenaStart ? breakCenaStart : null,
+        rectified_pausa_cena_fine: breakCenaEnd ? breakCenaEnd : null,
         rectified_total_hours: newHours,
         rectification_note: rectificationNote.trim(),
         rectified_by: user?.id,
@@ -269,29 +379,30 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
       // Update the correct table based on shift type
       const tableName = isExtraShift ? 'extra_shifts_checkins' : 'warehouse_checkins';
 
-      console.log('💾 Invio update a Supabase (azienda):', { tableName, shiftId: shift.id, updateData });
+      console.log('💾 Invio update a Supabase:', { tableName, shiftId: shift.id, updateData });
 
       const { error: updateError } = await supabase
         .from(tableName)
         .update(updateData)
         .eq('id', shift.id);
 
-      console.log('✅ Risposta Supabase (azienda):', { error: updateError });
+      console.log('✅ Risposta Supabase:', { error: updateError });
 
       if (updateError) {
         console.error('❌ Errore Supabase:', updateError);
         throw updateError;
       }
 
+      // La rettifica è stata salvata con successo
       showSuccess('Rettifica salvata con successo!');
       setIsEditing(false);
       onUpdate();
+      setIsSaving(false);
     } catch (err: any) {
       console.error('❌ Errore aggiornamento turno:', err);
       const errorMessage = err.message || 'Errore nel salvataggio delle modifiche';
       setError(errorMessage);
       showError(errorMessage);
-    } finally {
       setIsSaving(false);
     }
   };
@@ -301,6 +412,8 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
     setEditedCheckOut(shift.check_out_turno?.substring(0, 5) || '');
     setBreakStart('');
     setBreakEnd('');
+    setBreakCenaStart('');
+    setBreakCenaEnd('');
     setRectificationNote('');
     setRequestOvertime(false);
     setShowOvertimeWarning(false);
@@ -308,15 +421,201 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
     setIsEditing(false);
   };
 
+  const handleOvertimeSubmit = async () => {
+    if (!user?.id) {
+      showError('Utente non autenticato');
+      return;
+    }
+
+    const totalMinutesRequested = (overtimeHours * 60) + overtimeMinutes;
+
+    // Validazioni
+    if (totalMinutesRequested <= 0) {
+      showError('Inserisci almeno 30 minuti di straordinario');
+      return;
+    }
+
+    if (totalMinutesRequested % 30 !== 0) {
+      showError('Le ore straordinarie devono essere richieste con tagli di 30 minuti');
+      return;
+    }
+
+    if (totalMinutesRequested > maxOvertimeMinutes) {
+      showError(`Puoi richiedere al massimo ${formatMinutesToHoursMinutes(maxOvertimeMinutes)}`);
+      return;
+    }
+
+    if (!overtimeNote || overtimeNote.trim().length < 10) {
+      showError('Le note sono obbligatorie (minimo 10 caratteri)');
+      return;
+    }
+
+    setSubmittingOvertime(true);
+
+    try {
+      // Prima salva la rettifica (sempre, perché potrebbe includere modifiche alle note)
+      const rectificationDate = new Date().toISOString();
+      const newHours = calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd);
+
+      const updateData: any = {
+        rectified_check_in_time: editedCheckIn,
+        rectified_check_out_time: editedCheckOut,
+        rectified_break_start: breakStart ? breakStart : null,
+        rectified_break_end: breakEnd ? breakEnd : null,
+        rectified_pausa_pranzo: (breakStart && breakEnd) ? true : false,
+        rectified_pausa_pranzo_inizio: breakStart ? breakStart : null,
+        rectified_pausa_pranzo_fine: breakEnd ? breakEnd : null,
+        rectified_pausa_cena_inizio: breakCenaStart ? breakCenaStart : null,
+        rectified_pausa_cena_fine: breakCenaEnd ? breakCenaEnd : null,
+        rectified_total_hours: newHours,
+        rectification_note: rectificationNote.trim(),
+        notes: shiftNotes.trim() || null,
+        rectified_by: user?.id,
+        rectified_at: rectificationDate,
+        overtime_requested: true,
+        total_hours: newHours,
+        status: 'completed'
+      };
+
+      if (!shift.check_out_turno || shift.status !== 'completed') {
+        updateData.check_out_time = editedCheckOut;
+      }
+
+      const tableName = isExtraShift ? 'extra_shifts_checkins' : 'warehouse_checkins';
+
+      const { error: updateError } = await supabase
+        .from(tableName)
+        .update(updateData)
+        .eq('id', shift.id);
+
+      if (updateError) throw updateError;
+
+      // Poi crea o aggiorna la richiesta straordinario
+      const payload: any = {
+        crewid: user.id,
+        ore_straordinario: totalMinutesRequested / 60,
+        overtime_minutes: totalMinutesRequested,
+        note: overtimeNote.trim(),
+        status: 'in_attesa',
+        hourly_rate: 15.00,
+        warehouse_checkin_id: shift.id,
+        shift_date: shift.giorno_turno || null,
+        updated_at: new Date().toISOString()
+      };
+
+      // Aggiungi company_id se disponibile
+      if (companyId) {
+        payload.company_id = companyId;
+      }
+
+      // Aggiungi turno_id se disponibile
+      const turnoId = shiftRow?.assegnazione_id || shiftRow?.shift_id || shift.turno_id || (shift as any).shift_id;
+      if (turnoId) {
+        payload.turno_id = turnoId;
+      }
+
+      // Verifica se esiste già una richiesta
+      if (existingOvertimeRequest) {
+        // UPDATE della richiesta esistente
+        console.log('📝 Aggiornamento richiesta straordinario esistente:', existingOvertimeRequest.id, payload);
+        
+        const { error } = await supabase
+          .from('richieste_straordinari_v2')
+          .update(payload)
+          .eq('id', existingOvertimeRequest.id);
+
+        if (error) {
+          console.error('❌ Errore aggiornamento straordinario:', error);
+          throw error;
+        }
+        
+        showSuccess('Rettifica e richiesta straordinario aggiornate con successo!');
+      } else {
+        // INSERT nuova richiesta
+        console.log('💾 Creazione nuova richiesta straordinario:', payload);
+
+        const { error } = await supabase.from('richieste_straordinari_v2').insert(payload);
+
+        if (error) {
+          console.error('❌ Errore inserimento straordinario:', error);
+          throw error;
+        }
+        
+        showSuccess('Rettifica e richiesta straordinario salvate con successo!');
+      }
+
+      setShowOvertimeModal(false);
+      setIsEditing(false);
+      setOvertimeNote('');
+      setRequestOvertime(false);
+      onUpdate();
+    } catch (err: any) {
+      console.error('❌ Errore richiesta straordinario:', err);
+      showError(err?.message || 'Errore nell\'invio della richiesta straordinario');
+    } finally {
+      setSubmittingOvertime(false);
+    }
+  };
+
+  const handleOvertimeCancel = () => {
+    setShowOvertimeModal(false);
+    setOvertimeNote('');
+    setRequestOvertime(false);
+    // Non chiudiamo l'editing mode, permettiamo all'utente di modificare ancora
+  };
+
   if (!isEditing) {
     return (
-      <button
-        onClick={() => setIsEditing(true)}
-        className="w-full mt-2 bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 flex items-center justify-center space-x-2"
-      >
-        <Edit className="h-4 w-4" />
-        <span>Rettifica Orari Turno</span>
-      </button>
+      <div className="mt-2 space-y-2">
+        {existingOvertimeRequest && (
+          <div className="bg-yellow-900/20 border border-yellow-600/30 rounded-lg p-3">
+            <div className="flex items-start space-x-2">
+              <AlertCircle className="h-4 w-4 text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <div className="text-xs font-semibold text-yellow-400 mb-1">
+                  Straordinari Richiesti
+                </div>
+                <div className="text-xs text-gray-300 space-y-1">
+                  <div>
+                    <span className="font-semibold">Ore richieste:</span> {formatMinutesToHoursMinutes(existingOvertimeRequest.overtime_minutes)}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Stato:</span>{' '}
+                    <span className={`font-semibold ${
+                      existingOvertimeRequest.status === 'in_attesa' ? 'text-yellow-300' :
+                      existingOvertimeRequest.status === 'approved' ? 'text-green-300' :
+                      'text-red-300'
+                    }`}>
+                      {existingOvertimeRequest.status === 'in_attesa' ? 'In Attesa' :
+                       existingOvertimeRequest.status === 'approved' ? 'Approvata' :
+                       'Rifiutata'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="font-semibold">Importo:</span> €{existingOvertimeRequest.total_amount}
+                  </div>
+                  {existingOvertimeRequest.note && (
+                    <div className="mt-2 pt-2 border-t border-yellow-700/30">
+                      <div className="font-semibold mb-1">Note:</div>
+                      <div className="text-gray-400 italic">"{existingOvertimeRequest.note}"</div>
+                    </div>
+                  )}
+                </div>
+                <div className="text-xs text-yellow-500 mt-2">
+                  ℹ️ Clicca su "Rettifica Orari Turno" per modificare la richiesta
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => setIsEditing(true)}
+          className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 flex items-center justify-center space-x-2"
+        >
+          <Edit className="h-4 w-4" />
+          <span>Rettifica Orari Turno</span>
+        </button>
+      </div>
     );
   }
 
@@ -341,7 +640,8 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
   const shiftTypeInfo = determineShiftTypeLabel();
 
   return (
-    <div className="mt-3 bg-gray-800 border border-gray-600 rounded-lg p-4">
+    <>
+      <div className="mt-3 bg-gray-800 border border-gray-600 rounded-lg p-4">
       <h4 className="text-sm font-semibold text-white mb-3 flex items-center space-x-2">
         <Edit className="h-4 w-4" />
         <span>Rettifica Orari</span>
@@ -385,14 +685,14 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div>
               <span className="text-blue-300">Check-in:</span>
-              <div className="text-white font-semibold">{extractTime(shift.original_check_in)}</div>
+              <div className="text-white font-semibold">{toItalianTime(shift.original_check_in)}</div>
             </div>
             <div>
               <span className="text-blue-300">Check-out:</span>
               <div className="text-white font-semibold">
                 {shift.original_check_out ? (
                   <>
-                    {extractTime(shift.original_check_out)}
+                    {toItalianTime(shift.original_check_out)}
                     {shift.auto_checkout && (
                       <span className="ml-1 text-xs bg-purple-800 text-purple-200 px-1 py-0.5 rounded">AUTO</span>
                     )}
@@ -480,7 +780,57 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
             </div>
           </div>
           <div className="text-xs text-gray-400 mt-1">
-            Lascia vuoto se non hai effettuato pausa pranzo
+            ℹ️ Lascia vuoto se non hai effettuato pausa pranzo
+          </div>
+        </div>
+
+        <div className="border-t border-gray-600 pt-3 mt-3">
+          <label className="block text-xs font-medium text-gray-300 mb-2 flex items-center space-x-2">
+            <Coffee className="h-4 w-4 text-purple-400" />
+            <span>Pausa Cena (opzionale):</span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">
+                Inizio Pausa
+              </label>
+              <input
+                type="time"
+                value={breakCenaStart}
+                onChange={(e) => setBreakCenaStart(e.target.value)}
+                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">
+                Fine Pausa
+              </label>
+              <input
+                type="time"
+                value={breakCenaEnd}
+                onChange={(e) => setBreakCenaEnd(e.target.value)}
+                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+              />
+            </div>
+          </div>
+          <div className="text-xs text-gray-400 mt-1">
+            ℹ️ Lascia vuoto se non hai effettuato pausa cena
+          </div>
+        </div>
+
+        <div className="border-t border-gray-600 pt-3 mt-3">
+          <label className="block text-xs font-medium text-gray-300 mb-2">
+            📝 Note del Turno (opzionale)
+          </label>
+          <textarea
+            value={shiftNotes}
+            onChange={(e) => setShiftNotes(e.target.value)}
+            placeholder="Note o commenti sul turno lasciate durante il check-in..."
+            rows={4}
+            className="w-full bg-gray-700 border-2 border-cyan-700 rounded px-3 py-2 text-white text-sm focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
+          />
+          <div className="text-xs text-cyan-300 mt-1">
+            ℹ️ Queste sono le note che hai inserito durante il turno. Puoi modificarle qui.
           </div>
         </div>
 
@@ -528,37 +878,65 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
               <div className="flex items-center justify-between text-xs mb-1">
                 <span className="text-blue-200">Nuove ore totali:</span>
                 <span className="font-bold text-blue-100 text-lg">
-                  {calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd).toFixed(2)}h
+                  {formatHoursAsTime(calculateHours(editedCheckIn, editedCheckOut, breakStart, breakEnd, breakCenaStart, breakCenaEnd))}
                 </span>
               </div>
-              {breakStart && breakEnd && (
-                <div className="text-xs text-blue-300 mt-1">
-                  (Include pausa: {breakStart} - {breakEnd})
+              {(breakStart && breakEnd) || (breakCenaStart && breakCenaEnd) ? (
+                <div className="text-xs text-blue-300 mt-1 space-y-0.5">
+                  {breakStart && breakEnd && (
+                    <div>Pausa pranzo: {breakStart} - {breakEnd}</div>
+                  )}
+                  {breakCenaStart && breakCenaEnd && (
+                    <div>Pausa cena: {breakCenaStart} - {breakCenaEnd}</div>
+                  )}
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
         )}
 
         {/* Pulsante Richiesta Straordinari - sempre visibile */}
         <div className="mt-3">
+          {existingOvertimeRequest && (
+            <div className="mb-2 bg-yellow-900/20 border border-yellow-600/30 rounded-lg p-2">
+              <div className="text-xs text-yellow-400 font-semibold flex items-center space-x-1">
+                <AlertCircle className="h-3 w-3" />
+                <span>Richiesta straordinari già presente</span>
+              </div>
+              <div className="text-xs text-gray-300 mt-1">
+                {formatMinutesToHoursMinutes(existingOvertimeRequest.overtime_minutes)} • {existingOvertimeRequest.status === 'in_attesa' ? 'In attesa' : existingOvertimeRequest.status === 'approved' ? 'Approvata' : 'Rifiutata'}
+              </div>
+              <div className="text-xs text-gray-400 mt-0.5">
+                Clicca per modificare la richiesta
+              </div>
+            </div>
+          )}
           <button
             type="button"
-            onClick={() => setRequestOvertime(!requestOvertime)}
-            disabled={!hasOvertimeInContract}
+            onClick={() => {
+              if (maxOvertimeMinutes > 0 || existingOvertimeRequest) {
+                // Se ci sono ore straordinarie o richiesta esistente, apri il modal
+                setRequestOvertime(true);
+                setShowOvertimeModal(true);
+              } else {
+                // Altrimenti solo toggle dello stato
+                setRequestOvertime(!requestOvertime);
+              }
+            }}
+            disabled={!hasOvertimeInContract || (requestOvertime && maxOvertimeMinutes === 0 && !existingOvertimeRequest)}
             className={`w-full py-3 rounded-lg font-semibold transition-all ${
               hasOvertimeInContract
-                ? requestOvertime
+                ? (requestOvertime || existingOvertimeRequest)
                   ? 'bg-orange-600 text-white hover:bg-orange-700'
                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600 border border-gray-600'
                 : 'bg-gray-800 text-gray-500 border border-gray-700 cursor-not-allowed'
             }`}
           >
             {hasOvertimeInContract ? (
-              requestOvertime ? (
+              (requestOvertime || existingOvertimeRequest) ? (
                 <span className="flex items-center justify-center space-x-2">
                   <AlertCircle className="h-4 w-4" />
-                  <span>Straordinari Richiesti</span>
+                  <span>{existingOvertimeRequest ? 'Modifica Straordinari' : 'Straordinari Richiesti'}</span>
                 </span>
               ) : (
                 <span>Richiedi Straordinari</span>
@@ -602,7 +980,119 @@ const ShiftActions: React.FC<ShiftActionsProps> = ({ shift, onUpdate }) => {
           )}
         </button>
       </div>
-    </div>
+      </div>
+
+      {/* Modal per richiesta straordinari */}
+    {showOvertimeModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div className="w-full max-w-lg bg-gray-900 rounded-lg p-6 border border-gray-700">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">
+              {existingOvertimeRequest ? 'Modifica Richiesta Straordinario' : 'Richiesta Straordinario'}
+            </h3>
+            <button 
+              onClick={handleOvertimeCancel} 
+              className="text-gray-400 hover:text-white"
+              disabled={submittingOvertime}
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <div className="space-y-4">
+            <div className="bg-yellow-900/20 border border-yellow-600/30 rounded p-3">
+              <div className="text-sm text-yellow-400 font-semibold">
+                Massimo richiedibile: {formatMinutesToHoursMinutes(maxOvertimeMinutes)}
+              </div>
+              <div className="text-xs text-gray-400 mt-1">
+                Calcolato in base alle ore lavorate e al turno previsto ({shift.ore_previste || 8}h)
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-300 mb-2 block font-medium">
+                Ore e minuti da richiedere (tagli di 30 minuti) <span className="text-red-400">*</span>
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Ore</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max={Math.floor(maxOvertimeMinutes / 60)}
+                    value={overtimeHours}
+                    onChange={(e) => setOvertimeHours(parseInt(e.target.value) || 0)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-center text-lg text-white"
+                    disabled={submittingOvertime}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Minuti</label>
+                  <select
+                    value={overtimeMinutes}
+                    onChange={(e) => setOvertimeMinutes(parseInt(e.target.value))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-center text-lg text-white"
+                    disabled={submittingOvertime}
+                  >
+                    <option value="0">00</option>
+                    <option value="30">30</option>
+                  </select>
+                </div>
+              </div>
+              <div className="text-xs text-gray-400 mt-2 text-center">
+                Totale: {formatMinutesToHoursMinutes((overtimeHours * 60) + overtimeMinutes)}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm text-gray-300 mb-2 block font-medium">
+                Motivazione richiesta <span className="text-red-400">*</span>
+              </label>
+              <textarea
+                value={overtimeNote}
+                onChange={(e) => setOvertimeNote(e.target.value)}
+                rows={4}
+                placeholder="Descrivi il motivo della richiesta straordinario (minimo 10 caratteri)..."
+                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm"
+                disabled={submittingOvertime}
+              />
+              <div className="text-xs text-gray-400 mt-1">
+                {overtimeNote.length}/10 caratteri minimi
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleOvertimeCancel}
+                disabled={submittingOvertime}
+                className="flex-1 bg-gray-600 text-white py-3 rounded-lg hover:bg-gray-500 disabled:opacity-50 flex items-center justify-center space-x-2"
+              >
+                <X className="h-4 w-4" />
+                <span>Annulla</span>
+              </button>
+              <button
+                onClick={handleOvertimeSubmit}
+                disabled={submittingOvertime}
+                className="flex-1 bg-yellow-600 text-black py-3 rounded-lg hover:bg-yellow-700 disabled:opacity-50 flex items-center justify-center space-x-2 font-semibold"
+              >
+                {submittingOvertime ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-black" />
+                    <span>Invio...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-4 w-4" />
+                    <span>Invia richiesta</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 

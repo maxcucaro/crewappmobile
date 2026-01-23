@@ -44,7 +44,7 @@ const WarehouseCheckIn: React.FC = () => {
   const { showSuccess, showError, showWarning, showInfo } = useToastContext();
   const { currentLocation, getCurrentLocation, isLoading:  gpsLoading, error: gpsError } = useGPSLocation();
   const { isOnline, addOfflineData } = useOfflineSync();
-  const { currentSession, activeSessions, elapsedTime, elapsedTimes, startSession, endSession, manualCheckOut, loadActiveSession } = usePersistentTimer();
+  const { currentSession, activeSessions, elapsedTime, elapsedTimes, startSession, endSession, manualCheckOut } = usePersistentTimer();
   
   // Stati principali
   const [currentView, setCurrentView] = useState<'main' | 'scanner' | 'meal_selection'>('main');
@@ -73,6 +73,10 @@ const WarehouseCheckIn: React.FC = () => {
   const [showScanner, setShowScanner] = useState(false);
   const [scannerError, setScannerError] = useState<string | null>(null);
   const scannerRef = useRef<any>(null);
+  // Usa ref invece di state per controllo sincrono immediato
+  const isProcessingScanRef = useRef(false);
+  const lastScanTimestampRef = useRef<number>(0);
+  const lastScannedCodeRef = useRef<string>('');
 
   // Stati check-in forzato
   const [showForceCheckInModal, setShowForceCheckInModal] = useState(false);
@@ -799,6 +803,10 @@ const WarehouseCheckIn: React.FC = () => {
   const initScanner = () => {
     setShowScanner(true);
     setScannerError(null);
+    // Reset dei ref quando si apre lo scanner
+    isProcessingScanRef.current = false;
+    lastScanTimestampRef.current = 0;
+    lastScannedCodeRef.current = '';
     
     setTimeout(() => {
       const scannerElement = document.getElementById("qr-reader");
@@ -841,10 +849,46 @@ const WarehouseCheckIn: React.FC = () => {
   };
 
   const onScanSuccess = (decodedText: string) => {
+    const now = Date.now();
+    const timeSinceLastScan = now - lastScanTimestampRef.current;
+    
+    // ✅ TRIPLO CONTROLLO per prevenire scannerizzazioni multiple:
+    // 1. Verifica se già in elaborazione (ref sincrono)
+    if (isProcessingScanRef.current) {
+      console.log('⚠️ Scansione già in corso, IGNORATO');
+      return;
+    }
+    
+    // 2. Verifica se è lo stesso codice scansionato di recente (debounce 2 secondi)
+    if (decodedText === lastScannedCodeRef.current && timeSinceLastScan < 2000) {
+      console.log('⚠️ Codice duplicato entro 2 secondi, IGNORATO');
+      return;
+    }
+    
+    // 3. Verifica se è una scansione troppo veloce (< 500ms dalla precedente)
+    if (timeSinceLastScan < 500) {
+      console.log('⚠️ Scansione troppo veloce (<500ms), IGNORATO');
+      return;
+    }
+    
+    console.log('✅ QR Code rilevato e ACCETTATO:', decodedText);
+    
+    // Imposta i flag IMMEDIATAMENTE (sincrono)
+    isProcessingScanRef.current = true;
+    lastScanTimestampRef.current = now;
+    lastScannedCodeRef.current = decodedText;
+    
     setManualQrCode('');
     
-    // NON chiudere lo scanner qui - verrà chiuso solo dopo check-in completato con successo
-    // Questo permette retry immediato se il QR code non è valido
+    // ✅ FERMA LO SCANNER IMMEDIATAMENTE dopo la prima scansione valida
+    if (scannerRef.current) {
+      try {
+        scannerRef.current.clear();
+        console.log('🛑 Scanner fermato dopo scansione');
+      } catch (error) {
+        console.error('Errore durante la chiusura dello scanner:', error);
+      }
+    }
     
     // Procedi con la validazione del QR code
     processQrCodeCheckIn(decodedText);
@@ -863,6 +907,10 @@ const WarehouseCheckIn: React.FC = () => {
     }
     setShowScanner(false);
     setCurrentView('main');
+    // Reset del ref quando si chiude lo scanner
+    isProcessingScanRef.current = false;
+    lastScanTimestampRef.current = 0;
+    lastScannedCodeRef.current = '';
   };
 
   const processQrCodeCheckIn = (qrCode: string) => {
@@ -875,6 +923,8 @@ const WarehouseCheckIn: React.FC = () => {
       } else {
         showError('Codice Backup Non Riconosciuto', `Il codice backup "${qrCode}" non corrisponde a nessun magazzino registrato.  Verifica di aver inserito il codice corretto.`);
       }
+      // Reset del ref per permettere una nuova scansione
+      isProcessingScanRef.current = false;
       return;
     }
 
@@ -890,6 +940,8 @@ const WarehouseCheckIn: React.FC = () => {
     if (!location && !forceCheckin) {
       setForceCheckInWarehouse(warehouse);
       setShowForceCheckInModal(true);
+      // NON resettare isProcessingScanRef qui - rimane true per bloccare altre scansioni
+      // Il ref verrà resettato solo quando l'utente annulla o completa il check-in
       return;
     }
 
@@ -902,6 +954,7 @@ const WarehouseCheckIn: React.FC = () => {
 
     if (!selectedShift) {
       showError('Errore Check-in', 'Turno non selezionato');
+      isProcessingScanRef.current = false;
       return;
     }
 
@@ -909,6 +962,7 @@ const WarehouseCheckIn: React.FC = () => {
     const validation = validateShiftTiming(selectedShift);
     if (!validation.isValid || !validation.canCheckIn) {
       showError('Check-in Non Valido', `Impossibile procedere:  ${validation.reason}`);
+      isProcessingScanRef.current = false;
       return;
     }
 
@@ -917,14 +971,38 @@ const WarehouseCheckIn: React.FC = () => {
     const today = toLocalDateString(now);
 
     // Controlla se esiste già un check-in per questo turno oggi
-    const existingShiftCheckIn = todayCheckIns.find((ci:  any) => {
+    const existingShiftCheckIn = todayCheckIns.find((ci: any) => {
       const ciDate = ci.date;
-      const shiftDate = selectedShift.data_turno. split('T')[0];
-      return ci.shift_id === selectedShift.turno_id && ciDate === shiftDate;
+      const shiftDate = selectedShift.data_turno.split('T')[0];
+      // Controlla anche che il turno sia attivo (non completato)
+      return ci.shift_id === selectedShift.turno_id && 
+             ciDate === shiftDate && 
+             ci.status === 'active';
     });
 
     if (existingShiftCheckIn) {
-      showError('Check-in Duplicato', 'Hai già effettuato il check-in per questo turno oggi.  Verifica lo storico dei tuoi check-in.');
+      showError('Check-in Duplicato', 'Hai già effettuato il check-in per questo turno oggi. Verifica lo storico dei tuoi check-in.');
+      isProcessingScanRef.current = false;
+      return;
+    }
+
+    // ✅ DOPPIO CONTROLLO: Verifica sul database in tempo reale prima di inserire
+    const shiftDate = selectedShift.data_turno.split('T')[0];
+    const { data: dbCheck, error: dbCheckError } = await supabase
+      .from('warehouse_checkins')
+      .select('id, status')
+      .eq('crew_id', user?.id)
+      .eq('shift_id', selectedShift.turno_id)
+      .eq('date', shiftDate)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (!dbCheckError && dbCheck) {
+      console.warn('⚠️ Check-in duplicato rilevato nel database:', dbCheck);
+      showError('Check-in Duplicato', 'Esiste già un check-in attivo per questo turno. Ricaricamento...');
+      // Ricarica i dati per sincronizzare
+      await checkExistingCheckIn();
+      isProcessingScanRef.current = false;
       return;
     }
 
@@ -1056,14 +1134,15 @@ const WarehouseCheckIn: React.FC = () => {
           } else {
             showSuccess('Check-in Completato', confirmMessage);
           }
-
-          // Ricarica sessioni attive per mostrare il timer immediatamente
-          await loadActiveSession();
-          // Carica subito lo stato pausa per mostrare i pulsanti
-          await loadBreakStatus();
           
           // ✅ Chiude lo scanner SOLO dopo check-in completato con successo
           closeScanner();
+          
+          // Reset del ref di elaborazione
+          isProcessingScanRef.current = false;
+          
+          // Ricarica i check-in per aggiornare lo stato
+          await checkExistingCheckIn();
         }
       } else {
         addOfflineData('checkin', checkInData);
@@ -1071,6 +1150,9 @@ const WarehouseCheckIn: React.FC = () => {
         
         // ✅ Chiude lo scanner anche per check-in offline (salvato correttamente)
         closeScanner();
+        
+        // Reset del ref di elaborazione
+        isProcessingScanRef.current = false;
       }
 
       // Reset stati
@@ -1080,6 +1162,8 @@ const WarehouseCheckIn: React.FC = () => {
       
     } catch (error) {
       showError('Errore Check-in', 'Si è verificato un errore durante il check-in.  Riprova.');
+      // Reset del ref anche in caso di errore
+      isProcessingScanRef.current = false;
     }
   };
 
@@ -2326,6 +2410,7 @@ const WarehouseCheckIn: React.FC = () => {
                 onClick={() => {
                   setShowForceCheckInModal(false);
                   setForceCheckInWarehouse(null);
+                  isProcessingScanRef.current = false; // Reset del ref quando si annulla
                 }}
                 className="flex-1 bg-gray-700 text-white py-3 px-4 rounded-lg hover:bg-gray-600 font-medium"
               >
@@ -2334,6 +2419,7 @@ const WarehouseCheckIn: React.FC = () => {
               <button
                 onClick={() => {
                   if (forceCheckInWarehouse) {
+                    // Il flag isProcessingScan viene gestito dentro handleWarehouseCheckIn
                     handleWarehouseCheckIn(forceCheckInWarehouse, true);
                     setShowForceCheckInModal(false);
                     setForceCheckInWarehouse(null);

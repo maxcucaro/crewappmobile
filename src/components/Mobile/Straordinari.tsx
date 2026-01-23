@@ -5,40 +5,46 @@ import { supabase } from '../../lib/db';
 import { Clock, RefreshCw } from 'lucide-react';
 
 /**
- * Straordinari - richiesta straordinari
- *
- * Requisiti:
- * - Lo straordinario può essere richiesto solo se il dipendente è autorizzato (benefit nel contratto)
- *   - Tentiamo di leggere campi possibili nella tabella crew_members / registration_requests per determinare il permesso
- * - Lo straordinario può essere richiesto quando l'utente ha lavorato più delle ore previste per il turno assegnato
- *   - Carichiamo assegnazioni turno (crew_assegnazione_turni) e checkin/checkout (warehouse_checkins / timesheet_entries)
- *   - Calcoliamo hours_scheduled e hours_worked -> excess = worked - scheduled
- * - REGOLA STRAORDINARI: Gli straordinari possono essere richiesti SOLO con tagli di 30 minuti
- *   - Arrotondamento SEMPRE per DIFETTO al multiplo di 30 inferiore
- *   - Esempi: 14 min → 0 min (NON richiedibile), 35 min → 30 min, 55 min → 30 min, 65 min → 60 min
- * - UI:
- *   - Lista turni candidati con excess > 0, mostrando scheduled / worked / excess (arrotondato)
- *   - Pulsante per aprire modal/form per richiedere straordinario (max = excess arrotondato)
- *   - Possibilità di inserire richiesta manuale se autorizzato (anche senza turno rilevabile)
- *
- * Nota:
- * - Il codice è difensivo: cerca nomi di colonna alternativi, gestisce assenze e mostra messaggi chiari.
- * - Inserimento usa tabella preferita 'crew_richieste_straordinari' (se non esiste prova 'straordinari' o 'crew_straordinari').
+ * Straordinari - richiesta straordinari con filtri per stato
+ * 
+ * Caratteristiche:
+ * - Mostra turni con ore eccedenti richiedibili
+ * - Permette di richiedere straordinari (multipli di 30 min)
+ * - Mostra richieste esistenti filtrate per stato
+ * - Permette modifica richieste in attesa
  */
 
 type CandidateShift = {
   source: 'warehouse' | 'event';
-  assignment_id: string; // id of crew_assegnazione_turni or timesheet_entries row
-  refShiftId?: string | null; // crew_assegnazione_turni.id (for warehouse)
-  refEventId?: string | null; // crew_events.id (for event)
+  assignment_id: string;
+  refShiftId?: string | null;
+  refEventId?: string | null;
   date?: string | null;
   title: string;
-  scheduledHours: number; // hours expected for the shift
-  workedHours: number; // computed actual worked hours
-  excessHours: number; // worked - scheduled (only positive shown)
-  requestableHours: number; // excess hours rounded down to 0.5 hour increments (arrotondato a multipli di 30 min)
+  scheduledHours: number;
+  workedHours: number;
+  excessHours: number;
+  requestableHours: number;
   raw?: any;
 };
+
+interface ExistingRequest {
+  id: string;
+  turno_id: string;
+  warehouse_checkin_id?: string;
+  shift_date?: string;
+  ore_straordinario: number;
+  overtime_minutes: number;
+  hourly_rate?: number;
+  total_amount?: number;
+  note?: string;
+  status: 'in_attesa' | 'approved' | 'rejected';
+  created_at: string;
+  title?: string;
+  source?: 'event' | 'warehouse';
+}
+
+type FilterType = 'all' | 'da_richiedere' | 'in_attesa' | 'approved' | 'rejected';
 
 // Utility: arrotonda i minuti per difetto a multipli di 30
 function calculateRequestableMinutes(minutes: number): number {
@@ -68,21 +74,37 @@ function hoursToMinutes(hours: number): number {
   return Math.round(hours * 60);
 }
 
+// Utility: converte interval PostgreSQL (formato "HH:MM:SS") in minuti
+function intervalToMinutes(intervalStr: string | null | undefined): number {
+  if (!intervalStr) return 0;
+  
+  // Formato: "HH:MM:SS" o "HH:MM:SS.microseconds"
+  const match = intervalStr.match(/^(\d+):(\d+):(\d+)/);
+  if (!match) return 0;
+  
+  const hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+  
+  return hours * 60 + minutes;
+}
+
 const Straordinari: React.FC = () => {
   const { user } = useAuth();
   const { showSuccess, showError } = useToastContext();
 
   const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState(false);
 
-  const [isAuthorized, setIsAuthorized] = useState<boolean | null>(null); // null = unknown/loading
+  const [isAuthorized, setIsAuthorized] = useState<boolean | null>(null);
   const [candidates, setCandidates] = useState<CandidateShift[]>([]);
+  const [existingRequests, setExistingRequests] = useState<ExistingRequest[]>([]);
+  const [selectedFilter, setSelectedFilter] = useState<FilterType>('all');
 
   // modal / form
   const [showFormFor, setShowFormFor] = useState<CandidateShift | null>(null);
-  const [manualMode, setManualMode] = useState(false); // allow manual request (if authorized)
-  const [requestHours, setRequestHours] = useState<number>(0); // ore intere
-  const [requestMinutes, setRequestMinutes] = useState<number>(0); // minuti (0 o 30)
+  const [manualMode, setManualMode] = useState(false);
+  const [editingRequest, setEditingRequest] = useState<ExistingRequest | null>(null);
+  const [requestHours, setRequestHours] = useState<number>(0);
+  const [requestMinutes, setRequestMinutes] = useState<number>(0);
   const [requestReason, setRequestReason] = useState<string>('');
   const [sending, setSending] = useState(false);
 
@@ -105,80 +127,41 @@ const Straordinari: React.FC = () => {
   }, [user?.id]);
 
   async function checkAuthorization() {
-    // Check if user has overtime benefits assigned via crew_tariffe
     try {
-      // 1) Load tariffe assignments
-      const { data: assignments } = await supabase
-        .from('crew_assegnazionetariffa')
-        .select('tariffe_ids')
-        .eq('dipendente_id', user?.id)
-        .eq('attivo', true);
+      // ID fisso del benefit straordinario
+      const STRAORDINARIO_BENEFIT_ID = '539577f9-d1cb-438d-bf2f-61ef4db2317e';
 
-      if (assignments && assignments.length > 0) {
-        // 2) Collect all tariffe IDs
-        const allTariffeIds: string[] = [];
-        assignments.forEach((assignment: any) => {
-          if (assignment.tariffe_ids && assignment.tariffe_ids.length > 0) {
-            allTariffeIds.push(...assignment.tariffe_ids);
-          }
-        });
+      const { data: benefit, error } = await supabase
+        .from('crew_benfit_straordinari')
+        .select('straordinari_abilitati, importo_benefit, attivo')
+        .eq('crew_id', user?.id)
+        .eq('benefit_id', STRAORDINARIO_BENEFIT_ID)
+        .maybeSingle();
 
-        if (allTariffeIds.length > 0) {
-          // 3) Load tariffe details
-          const { data: tariffe } = await supabase
-            .from('crew_tariffe')
-            .select('tipo_calcolo, categoria')
-            .in('id', allTariffeIds)
-            .eq('attivo', true);
-
-          // 4) Check if any tariffa is for overtime
-          if (tariffe && tariffe.length > 0) {
-            const hasOvertimeBenefit = tariffe.some((t: any) =>
-              t.tipo_calcolo?.includes('straordinario') ||
-              t.categoria?.includes('straordinario')
-            );
-
-            if (hasOvertimeBenefit) {
-              setIsAuthorized(true);
-              return true;
-            }
-          }
-        }
+      if (error) {
+        console.error('Errore verifica autorizzazione straordinari:', error);
+        setIsAuthorized(false);
+        return;
       }
-    } catch (e) {
-      console.error('Error checking overtime authorization via tariffe', e);
-    }
 
-    // Fallback: check old boolean fields
-    try {
-      const { data: cm } = await supabase.from('crew_members').select('benefit_straordinari').eq('id', user?.id).maybeSingle();
-      if (cm && (cm as any).benefit_straordinari) {
+      // Autorizzato se trovato record con straordinari_abilitati = true
+      // (il campo 'attivo' non viene considerato perché straordinari_abilitati è il flag specifico)
+      if (benefit && benefit.straordinari_abilitati === true) {
+        console.log('✅ Dipendente autorizzato agli straordinari - Tariffa oraria: €' + benefit.importo_benefit);
         setIsAuthorized(true);
-        return true;
+      } else {
+        console.log('❌ Dipendente NON autorizzato agli straordinari');
+        setIsAuthorized(false);
       }
-    } catch (e) {
-      // ignore
+    } catch (err) {
+      console.error('checkAuthorization error', err);
+      setIsAuthorized(false);
     }
-
-    try {
-      const { data: rr } = await supabase.from('registration_requests').select('benefit_straordinari').eq('auth_user_id', user?.id).maybeSingle();
-      if (rr && (rr as any).benefit_straordinari) {
-        setIsAuthorized(true);
-        return true;
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    // Not authorized
-    setIsAuthorized(false);
-    return false;
   }
 
-  // utility: parse hh:mm or timestamp strings and compute difference in hours
-  function parseDateTime(val?: string | null) {
-    if (!val) return null;
-    const d = new Date(val);
+  function parseDateTime(dateTimeStr?: string | null): Date | null {
+    if (!dateTimeStr) return null;
+    const d = new Date(dateTimeStr);
     if (isNaN(d.getTime())) return null;
     return d;
   }
@@ -195,263 +178,233 @@ const Straordinari: React.FC = () => {
     if (!user?.id) return [];
     const out: CandidateShift[] = [];
 
-    // Load existing overtime requests to exclude already requested shifts
+    // Load existing overtime requests WITH FULL DATA
+    const enrichedExistingRequests: ExistingRequest[] = [];
     let existingRequestTurnoIds: string[] = [];
+    
     try {
-      const { data: existingRequests } = await supabase
+      const { data: existingReqs } = await supabase
         .from('richieste_straordinari_v2')
-        .select('turno_id')
+        .select('*')
         .eq('crewid', user.id)
-        .not('turno_id', 'is', null);
+        .order('created_at', { ascending: false });
       
-      if (existingRequests && existingRequests.length > 0) {
-        existingRequestTurnoIds = existingRequests
-          .map((req: any) => req.turno_id)
-          .filter((id: string | null) => id !== null);
+      if (existingReqs && existingReqs.length > 0) {
+        for (const req of existingReqs) {
+          let title = 'Richiesta';
+          let source: 'event' | 'warehouse' = 'warehouse';
+
+          if (req.warehouse_checkin_id) {
+            // Usa warehouse_checkins_enriched per avere più informazioni
+            const { data: wc } = await supabase
+              .from('warehouse_checkins_enriched')
+              .select('warehouse_name, noteturno')
+              .eq('id', req.warehouse_checkin_id)
+              .maybeSingle();
+            if (wc) {
+              title = wc.warehouse_name || wc.noteturno || 'Turno Magazzino';
+            }
+          } else if (req.turno_id) {
+            // Non possiamo caricare il nome dal turno_id perché la tabella turni non esiste
+            title = `Turno ${req.shift_date ? new Date(req.shift_date).toLocaleDateString('it-IT') : 'Evento'}`;
+            source = 'event';
+          }
+
+          enrichedExistingRequests.push({
+            ...req,
+            title,
+            source
+          });
+
+          // Aggiungi sia turno_id che warehouse_checkin_id per escludere duplicati
+          if (req.turno_id) {
+            existingRequestTurnoIds.push(req.turno_id);
+          }
+          if (req.warehouse_checkin_id) {
+            existingRequestTurnoIds.push(req.warehouse_checkin_id);
+          }
+        }
       }
     } catch (e) {
       console.warn('Failed to load existing overtime requests', e);
     }
 
-    // Load warehouse shifts with overtime (requisito_straordinari = true)
+    setExistingRequests(enrichedExistingRequests);
+
+    // Load warehouse shifts with overtime
     try {
       const { data: overtimeShifts } = await supabase
         .from('warehouse_checkins')
-        .select(`
-          id,
-          date,
-          check_in_time,
-          check_out_time,
-          net_hours,
-          overtime_hours,
-          "oraro in eccesso",
-          shift_id,
-          assegnazione_id,
-          notes
-        `)
+        .select('*')
         .eq('crew_id', user.id)
         .eq('requisito_straordinari', true)
         .order('date', { ascending: false })
-        .limit(100);
+        .limit(50);
 
-      for (const shift of (overtimeShifts || []) as any[]) {
-        try {
-          // Parse excess hours from interval format or numeric field
-          let excessHours = 0;
-
-          // Try overtime_hours first (numeric)
-          if (shift.overtime_hours) {
-            excessHours = Number(shift.overtime_hours);
-          }
-          // Try "oraro in eccesso" (interval)
-          else if (shift['oraro in eccesso']) {
-            const interval = shift['oraro in eccesso'];
-            // Parse PostgreSQL interval format (e.g., "02:30:00")
-            const match = interval.match(/(\d+):(\d+):(\d+)/);
-            if (match) {
-              const hours = parseInt(match[1], 10);
-              const minutes = parseInt(match[2], 10);
-              excessHours = hours + (minutes / 60);
-            }
+      if (overtimeShifts && overtimeShifts.length > 0) {
+        overtimeShifts.forEach((wc: any) => {
+          if (existingRequestTurnoIds.includes(wc.id)) {
+            return; // Skip già richiesti
           }
 
-          // Calculate requestable hours (arrotondato a multipli di 30 min)
-          const requestableHours = calculateRequestableHours(excessHours);
+          // Converti orario_di_lavoro_previsto da interval a minuti
+          const scheduled = intervalToMinutes(wc.orario_di_lavoro_previsto);
+          const worked = Number(wc.total_minutes) || 0;
+          const excess = Math.max(0, worked - scheduled);
+          
+          console.log(`Shift ${wc.id}: scheduled=${scheduled}min, worked=${worked}min, excess=${excess}min`);
 
-          // Only include if there are requestable hours (>= 30 minutes)
-          if (requestableHours > 0) {
-            // Calculate total worked hours
-            const workedHours = shift.net_hours ? Number(shift.net_hours) : null;
-            const scheduledHours = workedHours ? Math.round((workedHours - excessHours) * 100) / 100 : 8;
-
-            // Se assegnazione_id è NULL, prova a trovarlo cercando in crew_assegnazione_turni
-            let assignmentId = shift.assegnazione_id;
-            if (!assignmentId && shift.shift_id && shift.date) {
-              try {
-                const { data: assignment } = await supabase
-                  .from('crew_assegnazione_turni')
-                  .select('id')
-                  .eq('dipendente_id', user.id)
-                  .eq('turno_id', shift.shift_id)
-                  .eq('data_turno', shift.date)
-                  .maybeSingle();
-                
-                if (assignment) {
-                  assignmentId = assignment.id;
-                  console.log('Found assignment via fallback:', assignmentId);
-                } else {
-                  console.warn('No assignment found for shift', { shift_id: shift.shift_id, date: shift.date, user_id: user.id });
-                }
-              } catch (e) {
-                console.warn('Failed to find assignment for shift', shift.id, e);
-              }
-            }
-
-            console.log('Final assignmentId for shift:', { shift_id: shift.id, date: shift.date, assignmentId });
-
-            // Skip if already requested
-            if (assignmentId && existingRequestTurnoIds.includes(assignmentId)) {
-              console.log('Skipping shift - already requested:', assignmentId);
-              continue;
-            }
-
-            out.push({
-              source: 'warehouse',
-              assignment_id: assignmentId || shift.shift_id || shift.id,
-              refShiftId: assignmentId, // Usa assegnazione_id che è FK a crew_assegnazione_turni
-              date: shift.date,
-              title: `Turno Magazzino ${shift.date}`,
-              scheduledHours,
-              workedHours: workedHours || scheduledHours + excessHours,
-              excessHours: Math.round(excessHours * 100) / 100,
-              requestableHours: Math.round(requestableHours * 100) / 100,
-              raw: shift
-            });
+          if (excess < 30) {
+            return; // Non richiedibile
           }
-        } catch (e) {
-          console.warn('Error processing overtime shift', shift, e);
-          continue;
-        }
+
+          const requestable = calculateRequestableMinutes(excess);
+          if (requestable < 30) {
+            return;
+          }
+
+          out.push({
+            source: 'warehouse',
+            assignment_id: wc.id,
+            refShiftId: wc.id,
+            date: wc.date,
+            title: `Turno ${wc.date || 'Magazzino'}`,
+            scheduledHours: scheduled / 60,
+            workedHours: worked / 60,
+            excessHours: excess / 60,
+            requestableHours: requestable / 60,
+            raw: wc
+          });
+        });
       }
     } catch (e) {
       console.warn('Failed to load warehouse overtime shifts', e);
     }
 
-    // Also try to find event-based overtime (rare): if timesheet_entries show worked > event scheduled (we attempt)
-    try {
-      const { data: teAll } = await supabase
-        .from('timesheet_entries')
-        .select('id, event_id, start_time, end_time, date')
-        .eq('crew_id', user.id)
-        .order('date', { ascending: false })
-        .limit(500);
-      if (teAll) {
-        // group by event_id and date and try to compare with crew_events scheduled duration if available
-        for (const t of teAll as any[]) {
-          try {
-            const worked = durationHours(t.start_time, t.end_time);
-            if (!worked || !t.event_id) continue;
-            // fetch event info
-            const { data: ev } = await supabase.from('crew_events').select('*').eq('id', t.event_id).maybeSingle();
-            // try to get scheduled hours from event (duration_ore / durata_ore / start_time & end_time)
-            let scheduled = null as number | null;
-            if (ev) {
-              if ((ev as any).durata_ore) scheduled = Number((ev as any).durata_ore);
-              else if ((ev as any).duration_hours) scheduled = Number((ev as any).duration_hours);
-              else if ((ev as any).start_time && (ev as any).end_time) {
-                scheduled = durationHours((ev as any).start_time, (ev as any).end_time);
-              }
-            }
-            if (!scheduled) scheduled = 8;
-            const excess = Math.round(Math.max(0, worked - scheduled) * 100) / 100;
-            const requestableHours = calculateRequestableHours(excess);
-
-            // Only include if requestable hours >= 30 minutes
-            if (requestableHours > 0) {
-              out.push({
-                source: 'event',
-                assignment_id: t.id,
-                refEventId: t.event_id,
-                date: t.date ?? null,
-                title: (ev && ((ev as any).title || (ev as any).name)) || `Evento ${t.event_id}`,
-                scheduledHours: scheduled,
-                workedHours: Math.round(worked * 100) / 100,
-                excessHours: excess,
-                requestableHours: Math.round(requestableHours * 100) / 100,
-                raw: { timesheet: t, event: ev }
-              });
-            }
-          } catch (e) {
-            // ignore per-entry errors
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('timesheet_entries load failed', e);
-    }
-
-    // sort by requestableHours desc then date desc
-    out.sort((a, b) => {
-      if (b.requestableHours !== a.requestableHours) return b.requestableHours - a.requestableHours;
-      const da = a.date ? new Date(a.date).getTime() : 0;
-      const db = b.date ? new Date(b.date).getTime() : 0;
-      return db - da;
-    });
-
     setCandidates(out);
-    return out;
   }
 
   async function handleRequestSubmit(shift?: CandidateShift) {
-    if (!user?.id) {
-      showError('Utente non autenticato');
-      return;
-    }
-
-    // Calcola il totale dei minuti richiesti
-    const totalMinutesRequested = (requestHours * 60) + requestMinutes;
-
-    if (totalMinutesRequested <= 0) {
-      showError('Inserisci almeno 30 minuti di straordinario');
-      return;
-    }
-
-    // REGOLA: I minuti devono essere multipli di 30
-    if (totalMinutesRequested % 30 !== 0) {
-      showError('Le ore straordinarie devono essere richieste con tagli di 30 minuti');
-      return;
-    }
-
-    // if shift provided, enforce max <= requestableHours
-    if (shift) {
-      const maxMinutes = hoursToMinutes(shift.requestableHours);
-      if (totalMinutesRequested > maxMinutes) {
-        const maxFormatted = formatMinutesToHoursMinutes(maxMinutes);
-        showError(`Puoi richiedere al massimo ${maxFormatted} per questo turno`);
-        return;
-      }
-    }
-
-    if (!isAuthorized) {
-      showError('Non sei autorizzato agli straordinari');
-      return;
-    }
-
-    // Converti in ore decimali per il database (per compatibilità)
-    const hoursDecimal = totalMinutesRequested / 60;
-
     setSending(true);
     try {
-      // Build payload for richieste_straordinari_v2 table
+      const totalMinutes = requestHours * 60 + requestMinutes;
+      if (totalMinutes < 30) {
+        showError('Il minimo richiedibile è 30 minuti.');
+        setSending(false);
+        return;
+      }
+
+      // Verifica che le note siano state inserite (obbligatorie)
+      if (!requestReason || requestReason.trim() === '') {
+        showError('Le note sono obbligatorie. Descrivi il motivo della richiesta.');
+        setSending(false);
+        return;
+      }
+
+      const totalHours = totalMinutes / 60;
+
+      // Se stiamo modificando una richiesta esistente
+      if (editingRequest) {
+        const { error: updateErr } = await supabase
+          .from('richieste_straordinari_v2')
+          .update({
+            ore_straordinario: totalHours,
+            overtime_minutes: totalMinutes,
+            note: requestReason || null,
+          })
+          .eq('id', editingRequest.id);
+
+        if (updateErr) throw updateErr;
+
+        showSuccess('Richiesta aggiornata con successo');
+        setShowFormFor(null);
+        setManualMode(false);
+        setEditingRequest(null);
+        setRequestHours(0);
+        setRequestMinutes(0);
+        setRequestReason('');
+        await loadCandidates();
+        setSending(false);
+        return;
+      }
+
+      // RECUPERA TARIFFA STRAORDINARIO DAL BENEFIT
+      let hourlyRate = 0;
+
+      try {
+        // ID fisso del benefit straordinario
+        const STRAORDINARIO_BENEFIT_ID = '539577f9-d1cb-438d-bf2f-61ef4db2317e';
+
+        const { data: benefit, error: benefitError } = await supabase
+          .from('crew_benfit_straordinari')
+          .select('importo_benefit, straordinari_abilitati, attivo')
+          .eq('crew_id', user?.id)
+          .eq('benefit_id', STRAORDINARIO_BENEFIT_ID)
+          .maybeSingle();
+
+        if (benefitError) {
+          console.error('Errore recupero benefit straordinario:', benefitError);
+          showError('Errore nel recupero della tariffa straordinario.');
+          setSending(false);
+          return;
+        }
+
+        if (!benefit) {
+          showError('Non sei autorizzato a richiedere straordinari. Benefit straordinario non configurato.');
+          setSending(false);
+          return;
+        }
+
+        if (!benefit.straordinari_abilitati) {
+          showError('Non sei autorizzato a richiedere straordinari. Benefit straordinario disabilitato.');
+          setSending(false);
+          return;
+        }
+
+        hourlyRate = Number(benefit.importo_benefit);
+        if (hourlyRate <= 0) {
+          showError('Tariffa straordinario non valida. Contatta l\'amministrazione.');
+          setSending(false);
+          return;
+        }
+
+        console.log(`✅ Tariffa straordinario: €${hourlyRate}/h`);
+      } catch (err) {
+        console.error('Errore recupero tariffa straordinario:', err);
+        showError('Errore nel recupero della tariffa straordinario.');
+        setSending(false);
+        return;
+      }
+
+      // NUOVA RICHIESTA
+      // Nota: total_amount NON viene inserito perché è una colonna GENERATED nel database
+      // che calcola automaticamente: round((ore_straordinario * hourly_rate), 2)
       const payload: any = {
-        crewid: user.id,
-        ore_straordinario: hoursDecimal,
+        crewid: user?.id,
+        company_id: (user as any)?.user_metadata?.company_id,
+        ore_straordinario: totalHours,
+        overtime_minutes: totalMinutes,
+        hourly_rate: hourlyRate,
         note: requestReason || null,
-        status: 'in_attesa'
+        status: 'in_attesa',
       };
 
-      // attach shift/event references if available
-      if (shift) {
-        console.log('Shift data before insert:', { 
-          source: shift.source, 
-          refShiftId: shift.refShiftId, 
-          refEventId: shift.refEventId,
-          assignment_id: shift.assignment_id 
-        });
-        
+      if (!manualMode && shift) {
         if (shift.source === 'warehouse' && shift.refShiftId) {
+          payload.warehouse_checkin_id = shift.refShiftId;
           payload.turno_id = shift.refShiftId;
-          console.log('Added turno_id to payload:', shift.refShiftId);
+          if (shift.date) {
+            payload.shift_date = shift.date;
+          }
         }
         if (shift.source === 'event' && shift.refEventId) {
           payload.event_id = shift.refEventId;
-          console.log('Added event_id to payload:', shift.refEventId);
+          if (shift.date) {
+            payload.shift_date = shift.date;
+          }
         }
       }
 
-      console.log('Final payload before insert:', payload);
-
-      // Insert into richieste_straordinari_v2
       const { error } = await supabase.from('richieste_straordinari_v2').insert(payload);
 
       if (error) {
@@ -460,13 +413,12 @@ const Straordinari: React.FC = () => {
       }
 
       showSuccess('Richiesta straordinario inviata');
-      // reset form / close modal
       setShowFormFor(null);
       setManualMode(false);
+      setEditingRequest(null);
       setRequestHours(0);
       setRequestMinutes(0);
       setRequestReason('');
-      // refresh candidates list to reflect that a request was made (may or may not change)
       await loadCandidates();
     } catch (err: any) {
       console.error('handleRequestSubmit', err);
@@ -477,21 +429,18 @@ const Straordinari: React.FC = () => {
   }
 
   async function handleRefresh() {
-    setRefreshing(true);
     try {
       await Promise.all([checkAuthorization(), loadCandidates()]);
       showSuccess('Aggiornato');
     } catch (err) {
       console.error('refresh straordinari error', err);
       showError('Errore aggiornamento');
-    } finally {
-      setRefreshing(false);
     }
   }
 
-  // UI helpers
   const openForm = (c?: CandidateShift) => {
     setShowFormFor(c ?? null);
+    setEditingRequest(null);
     if (c) {
       const totalMinutes = hoursToMinutes(c.requestableHours);
       const hours = Math.floor(totalMinutes / 60);
@@ -503,6 +452,31 @@ const Straordinari: React.FC = () => {
       setRequestMinutes(0);
     }
   };
+
+  const openEditForm = (req: ExistingRequest) => {
+    setEditingRequest(req);
+    setShowFormFor(null);
+    setManualMode(false);
+    
+    const totalMinutes = req.overtime_minutes || 0;
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    setRequestHours(hours);
+    setRequestMinutes(minutes);
+    setRequestReason(req.note || '');
+  };
+
+  // Filtri per le richieste
+  const filteredRequests = existingRequests.filter(req => {
+    if (selectedFilter === 'all') return true;
+    if (selectedFilter === 'da_richiedere') return false;
+    if (selectedFilter === 'in_attesa') return req.status === 'in_attesa';
+    if (selectedFilter === 'approved') return req.status === 'approved';
+    if (selectedFilter === 'rejected') return req.status === 'rejected';
+    return true;
+  });
+
+  const showCandidates = selectedFilter === 'all' || selectedFilter === 'da_richiedere';
 
   return (
     <div className="bg-gray-900 p-4 rounded border border-gray-700">
@@ -518,68 +492,249 @@ const Straordinari: React.FC = () => {
         </div>
       </div>
 
-      <div className="mb-4">
-        {isAuthorized === null ? (
-          <div className="text-sm text-gray-400">Verifica autorizzazione...</div>
-        ) : isAuthorized === false ? (
-          <div className="text-sm text-red-300">Non risulti autorizzato agli straordinari dal tuo contratto.</div>
-        ) : (
-          <div className="text-sm text-green-300">Sei autorizzato agli straordinari.</div>
-        )}
-      </div>
+      {/* Controllo autorizzazione */}
+      {isAuthorized === null ? (
+        <div className="text-center py-12">
+          <div className="text-sm text-gray-400">Verifica autorizzazione in corso...</div>
+        </div>
+      ) : isAuthorized === false ? (
+        <div className="bg-red-900/20 border border-red-600/50 rounded-lg p-6">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5">
+              <svg className="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-red-300 mb-2">Accesso non autorizzato</h3>
+              <p className="text-sm text-red-200 leading-relaxed mb-4">
+                Non risulti autorizzato agli straordinari dal tuo contratto. 
+                Per richiedere straordinari è necessario che il tuo profilo contrattuale includa questo benefit.
+              </p>
+              <p className="text-sm text-red-200/80">
+                Se ritieni si tratti di un errore, contatta il tuo responsabile o l'ufficio HR.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="mb-4">
+            <div className="text-sm text-green-300">Sei autorizzato agli straordinari.</div>
+          </div>
+    
+          {/* Avviso importi indicativi */}
+          <div className="mb-4 bg-blue-900/30 border border-blue-600/50 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5">
+                <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h4 className="text-sm font-semibold text-blue-300 mb-1">Nota importante sugli importi</h4>
+                <p className="text-sm text-blue-200 leading-relaxed">
+                  Gli importi indicati per le ore straordinarie hanno carattere puramente orientativo e potrebbero subire variazioni. 
+                  Stiamo lavorando per garantire la massima precisione nel calcolo delle tariffe. 
+                  L'importo definitivo sarà confermato in fase di approvazione e liquidazione.
+                </p>
+              </div>
+            </div>
+          </div>
 
-      <div className="mb-4">
-        <h3 className="text-lg font-semibold mb-2">Turni con ore eccedenti</h3>
-        {loading ? (
-          <div className="text-sm text-gray-400">Caricamento...</div>
-        ) : candidates.length === 0 ? (
-          <div className="text-sm text-gray-500">Nessun turno con ore eccedenti rilevato.</div>
-        ) : (
-          <div className="space-y-3">
-            {candidates.map((c) => (
-              <div key={c.assignment_id} className="bg-gray-800 p-3 rounded border border-gray-700 flex items-center justify-between">
-                <div>
-                  <div className="font-medium text-white">{c.title}</div>
-                  <div className="text-sm text-gray-300">{c.date ? new Date(c.date).toLocaleDateString('it-IT') : '-'}</div>
-                  <div className="text-sm text-gray-300 mt-2">
-                    Previsto: {formatMinutesToHoursMinutes(hoursToMinutes(c.scheduledHours))} • Lavorato: {formatMinutesToHoursMinutes(hoursToMinutes(c.workedHours))}
+          {/* Filtri */}
+          <div className="mb-4 flex flex-wrap gap-2">
+        <button
+          onClick={() => setSelectedFilter('all')}
+          className={`px-3 py-1.5 rounded text-sm ${
+            selectedFilter === 'all'
+              ? 'bg-blue-600 text-white'
+              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+          }`}
+        >
+          Tutte
+        </button>
+        <button
+          onClick={() => setSelectedFilter('da_richiedere')}
+          className={`px-3 py-1.5 rounded text-sm ${
+            selectedFilter === 'da_richiedere'
+              ? 'bg-blue-600 text-white'
+              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+          }`}
+        >
+          Da Richiedere ({candidates.length})
+        </button>
+        <button
+          onClick={() => setSelectedFilter('in_attesa')}
+          className={`px-3 py-1.5 rounded text-sm ${
+            selectedFilter === 'in_attesa'
+              ? 'bg-yellow-600 text-black'
+              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+          }`}
+        >
+          In Attesa ({existingRequests.filter(r => r.status === 'in_attesa').length})
+        </button>
+        <button
+          onClick={() => setSelectedFilter('approved')}
+          className={`px-3 py-1.5 rounded text-sm ${
+            selectedFilter === 'approved'
+              ? 'bg-green-600 text-white'
+              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+          }`}
+        >
+          Approvate ({existingRequests.filter(r => r.status === 'approved').length})
+        </button>
+        <button
+          onClick={() => setSelectedFilter('rejected')}
+          className={`px-3 py-1.5 rounded text-sm ${
+            selectedFilter === 'rejected'
+              ? 'bg-red-600 text-white'
+              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+          }`}
+        >
+          Rifiutate ({existingRequests.filter(r => r.status === 'rejected').length})
+        </button>
+          </div>
+
+          {/* Turni da richiedere */}
+          {showCandidates && (
+            <div className="mb-4">
+          <h3 className="text-lg font-semibold mb-2">Turni con ore eccedenti</h3>
+          {loading ? (
+            <div className="text-sm text-gray-400">Caricamento...</div>
+          ) : candidates.length === 0 ? (
+            <div className="text-sm text-gray-500">Nessun turno con ore eccedenti rilevato.</div>
+          ) : (
+            <div className="space-y-3">
+              {candidates.map((c) => (
+                <div key={c.assignment_id} className="bg-gray-800 p-3 rounded border border-gray-700 flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-white">{c.title}</div>
+                    <div className="text-sm text-gray-300">{c.date ? new Date(c.date).toLocaleDateString('it-IT') : '-'}</div>
+                    <div className="text-sm text-gray-300 mt-2">
+                      Previsto: {formatMinutesToHoursMinutes(hoursToMinutes(c.scheduledHours))} • Lavorato: {formatMinutesToHoursMinutes(hoursToMinutes(c.workedHours))}
+                    </div>
+                    <div className="text-sm font-semibold text-yellow-400 mt-1">
+                      Richiedibili: {formatMinutesToHoursMinutes(hoursToMinutes(c.requestableHours))}
+                      {c.excessHours !== c.requestableHours && (
+                        <span className="text-xs text-gray-400 ml-1">(su {formatMinutesToHoursMinutes(hoursToMinutes(c.excessHours))} effettivi)</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-sm font-semibold text-yellow-400 mt-1">
-                    Richiedibili: {formatMinutesToHoursMinutes(hoursToMinutes(c.requestableHours))}
-                    {c.excessHours !== c.requestableHours && (
-                      <span className="text-xs text-gray-400 ml-1">(su {formatMinutesToHoursMinutes(hoursToMinutes(c.excessHours))} effettivi)</span>
-                    )}
+                  <div className="flex flex-col items-end">
+                    <button onClick={() => openForm(c)} className="py-2 px-3 rounded bg-yellow-600 text-black mb-2">Richiedi</button>
+                    <div className="text-xs text-gray-400">Fonte: {c.source === 'warehouse' ? 'Magazzino' : 'Evento'}</div>
                   </div>
                 </div>
-                <div className="flex flex-col items-end">
-                  <button onClick={() => openForm(c)} className="py-2 px-3 rounded bg-yellow-600 text-black mb-2">Richiedi</button>
-                  <div className="text-xs text-gray-400">Fonte: {c.source === 'warehouse' ? 'Magazzino' : 'Evento'}</div>
+              ))}
+            </div>
+          )}
+            </div>
+          )}
+
+          {/* Richieste esistenti */}
+          {filteredRequests.length > 0 && (
+            <div className="mb-4">
+          <h3 className="text-lg font-semibold mb-2">
+            {selectedFilter === 'in_attesa' && 'Richieste in Attesa'}
+            {selectedFilter === 'approved' && 'Richieste Approvate'}
+            {selectedFilter === 'rejected' && 'Richieste Rifiutate'}
+            {selectedFilter === 'all' && 'Richieste Esistenti'}
+            {selectedFilter === 'da_richiedere' && ''}
+          </h3>
+          <div className="space-y-3">
+            {filteredRequests.map((req) => (
+              <div key={req.id} className="bg-gray-800 p-3 rounded border border-gray-700">
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex-1">
+                    <div className="font-medium text-white">{req.title}</div>
+                    <div className="text-sm text-gray-300">
+                      {req.shift_date ? new Date(req.shift_date).toLocaleDateString('it-IT') : '-'}
+                    </div>
+                  </div>
+                  <div className={`px-2 py-1 rounded text-xs font-semibold ${
+                    req.status === 'in_attesa' ? 'bg-yellow-900/20 text-yellow-300 border border-yellow-600/30' :
+                    req.status === 'approved' ? 'bg-green-900/20 text-green-300 border border-green-600/30' :
+                    'bg-red-900/20 text-red-300 border border-red-600/30'
+                  }`}>
+                    {req.status === 'in_attesa' ? 'In Attesa' :
+                     req.status === 'approved' ? 'Approvata' :
+                     'Rifiutata'}
+                  </div>
+                </div>
+
+                <div className="text-sm text-gray-300 mb-2">
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4" />
+                    <span>Ore richieste: {formatMinutesToHoursMinutes(req.overtime_minutes)}</span>
+                  </div>
+                  {req.total_amount && (
+                    <div className="text-green-300 mt-1">
+                      Importo: €{req.total_amount.toFixed(2)}
+                    </div>
+                  )}
+                </div>
+
+                {req.note && (
+                  <div className="text-sm text-gray-400 italic mb-2">
+                    Note: {req.note}
+                  </div>
+                )}
+
+                <div className="flex gap-2 items-center justify-between">
+                  <div className="text-xs text-gray-500">
+                    Fonte: {req.source === 'warehouse' ? 'Magazzino' : 'Evento'}
+                  </div>
+                  {req.status === 'in_attesa' && (
+                    <button
+                      onClick={() => openEditForm(req)}
+                      className="py-1.5 px-3 rounded bg-blue-600 text-white text-sm"
+                    >
+                      Modifica
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
           </div>
-        )}
-      </div>
-
-      <div className="mb-6">
-        <h3 className="text-lg font-semibold mb-2">Richiesta manuale</h3>
-        <p className="text-sm text-gray-400 mb-2">Se non vedi il turno ma sei autorizzato, puoi creare una richiesta manuale (ammessa solo se autorizzato).</p>
-        <div className="flex gap-3">
-          <button onClick={() => { setManualMode(true); openForm(undefined); }} className="py-2 px-3 rounded bg-blue-600 text-white">Crea richiesta manuale</button>
         </div>
-      </div>
+      )}
+
+          {/* Richiesta manuale */}
+          {showCandidates && (
+            <div className="mb-6">
+              <h3 className="text-lg font-semibold mb-2">Richiesta manuale</h3>
+              <p className="text-sm text-gray-400 mb-2">Se non vedi il turno ma sei autorizzato, puoi creare una richiesta manuale (ammessa solo se autorizzato).</p>
+              <div className="flex gap-3">
+                <button onClick={() => { setManualMode(true); openForm(undefined); }} className="py-2 px-3 rounded bg-blue-600 text-white">Crea richiesta manuale</button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
       {/* Form modal / panel */}
-      {(showFormFor !== null || manualMode) && (
+      {(showFormFor !== null || manualMode || editingRequest !== null) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-lg bg-gray-900 rounded p-6">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-lg font-semibold">{manualMode ? 'Richiesta Straordinario (manuale)' : `Richiesta per ${showFormFor?.title}`}</h3>
-              <button onClick={() => { setShowFormFor(null); setManualMode(false); setRequestHours(0); setRequestMinutes(0); setRequestReason(''); }} className="text-gray-400">Chiudi</button>
+              <h3 className="text-lg font-semibold">
+                {editingRequest ? `Modifica Richiesta - ${editingRequest.title}` :
+                 manualMode ? 'Richiesta Straordinario (manuale)' :
+                 `Richiesta per ${showFormFor?.title}`}
+              </h3>
+              <button onClick={() => { 
+                setShowFormFor(null); 
+                setManualMode(false); 
+                setEditingRequest(null);
+                setRequestHours(0); 
+                setRequestMinutes(0); 
+                setRequestReason(''); 
+              }} className="text-gray-400">Chiudi</button>
             </div>
 
             <div className="grid grid-cols-1 gap-3">
-              {!manualMode && showFormFor && (
+              {!manualMode && !editingRequest && showFormFor && (
                 <div className="bg-yellow-900/20 border border-yellow-600/30 rounded p-3 mb-2">
                   <div className="text-sm text-yellow-400 font-semibold">
                     Massimo richiedibile: {formatMinutesToHoursMinutes(hoursToMinutes(showFormFor.requestableHours))}
@@ -624,15 +779,33 @@ const Straordinari: React.FC = () => {
               </div>
 
               <div>
-                <label className="text-sm text-gray-300">Note</label>
-                <textarea value={requestReason} onChange={(e) => setRequestReason(e.target.value)} rows={3} placeholder="Descrivi il motivo della richiesta..." className="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-2 py-2" />
+                <label className="text-sm text-gray-300">
+                  Note <span className="text-red-400">*</span>
+                </label>
+                <textarea 
+                  value={requestReason} 
+                  onChange={(e) => setRequestReason(e.target.value)} 
+                  rows={3} 
+                  placeholder="Descrivi il motivo della richiesta... (obbligatorio)" 
+                  className={`mt-1 w-full bg-gray-800 border rounded px-2 py-2 ${
+                    requestReason.trim() === '' ? 'border-red-600' : 'border-gray-700'
+                  }`}
+                  required
+                />
+                {requestReason.trim() === '' && (
+                  <p className="text-xs text-red-400 mt-1">Le note sono obbligatorie</p>
+                )}
               </div>
 
               <div className="flex gap-3">
                 <button onClick={() => handleRequestSubmit(showFormFor ?? undefined)} disabled={sending} className="flex-1 py-3 rounded bg-yellow-600 text-black">
-                  {sending ? 'Invio...' : 'Invia richiesta'}
+                  {sending ? 'Invio...' : (editingRequest ? 'Aggiorna richiesta' : 'Invia richiesta')}
                 </button>
-                <button onClick={() => { setShowFormFor(null); setManualMode(false); }} className="px-4 py-3 rounded border border-gray-700">Annulla</button>
+                <button onClick={() => { 
+                  setShowFormFor(null); 
+                  setManualMode(false); 
+                  setEditingRequest(null);
+                }} className="px-4 py-3 rounded border border-gray-700">Annulla</button>
               </div>
             </div>
           </div>

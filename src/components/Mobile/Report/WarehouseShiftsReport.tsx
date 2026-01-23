@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Building2, Clock, Coffee, Utensils, Gift, FileText, AlertTriangle, CheckCircle, Filter } from 'lucide-react';
+import { Building2, Clock, Coffee, Utensils, Gift, FileText, AlertTriangle, CheckCircle, Filter, AlertCircle } from 'lucide-react';
 import ShiftActions from './ShiftActions';
 import { toItalianTime } from '../../../utils/dateUtils';
 import { supabase } from '../../../lib/db';
@@ -74,11 +74,22 @@ const WarehouseShiftsReport: React.FC<WarehouseShiftsReportProps> = ({ selectedM
   const [selectedWarehouse, setSelectedWarehouse] = useState<string>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [overtimeRequests, setOvertimeRequests] = useState<Record<string, any>>({});
 
   const pad2 = (n: number) => String(n).padStart(2, '0');
 
   const toLocalDateStringForSQL = (d: Date) => {
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  };
+
+  const formatMinutesToHoursMinutes = (totalMinutes: number): string => {
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+
+    if (hours === 0 && minutes === 0) return '0min';
+    if (hours === 0) return `${minutes}min`;
+    if (minutes === 0) return `${hours}h`;
+    return `${hours}h ${minutes}min`;
   };
 
   const parseDateOnlyLocal = (isoDate: string): Date => {
@@ -88,9 +99,35 @@ const WarehouseShiftsReport: React.FC<WarehouseShiftsReportProps> = ({ selectedM
     return new Date(parts[0], parts[1] - 1, parts[2]);
   };
 
+  const loadOvertimeRequests = async () => {
+    if (!user?.id) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('richieste_straordinari_v2')
+        .select('*')
+        .eq('crewid', user.id);
+
+      if (error) throw error;
+
+      if (data) {
+        const requestsMap: Record<string, any> = {};
+        data.forEach(req => {
+          if (req.warehouse_checkin_id) {
+            requestsMap[req.warehouse_checkin_id] = req;
+          }
+        });
+        setOvertimeRequests(requestsMap);
+      }
+    } catch (err) {
+      console.error('Errore caricamento richieste straordinari:', err);
+    }
+  };
+
   useEffect(() => {
     if (user?.id) {
       loadWarehouseData();
+      loadOvertimeRequests();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, selectedMonth, selectedYear]);
@@ -590,7 +627,51 @@ const WarehouseShiftsReport: React.FC<WarehouseShiftsReportProps> = ({ selectedM
                   </div>
                 )}
 
-                <ShiftActions shift={shift} onUpdate={loadWarehouseData} tableName="warehouse_checkins" />
+                {/* Badge Straordinari Richiesti */}
+                {overtimeRequests[shift.id] && (
+                  <div className="bg-yellow-900/20 border border-yellow-600/30 rounded-lg p-3 mb-3">
+                    <div className="flex items-start space-x-2">
+                      <Clock className="h-4 w-4 text-yellow-400 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold text-yellow-400 mb-2">
+                          Straordinari Richiesti
+                        </div>
+                        <div className="text-xs text-gray-300 space-y-1">
+                          <div>
+                            <span className="font-semibold">Ore richieste:</span> {formatMinutesToHoursMinutes(overtimeRequests[shift.id].overtime_minutes)}
+                          </div>
+                          <div>
+                            <span className="font-semibold">Stato:</span>{' '}
+                            <span className={`font-semibold ${
+                              overtimeRequests[shift.id].status === 'in_attesa' ? 'text-yellow-300' :
+                              overtimeRequests[shift.id].status === 'approved' ? 'text-green-300' :
+                              'text-red-300'
+                            }`}>
+                              {overtimeRequests[shift.id].status === 'in_attesa' ? 'In Attesa' :
+                               overtimeRequests[shift.id].status === 'approved' ? 'Approvata' :
+                               'Rifiutata'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="font-semibold">Importo:</span> €{overtimeRequests[shift.id].total_amount}
+                          </div>
+                          {overtimeRequests[shift.id].note && (
+                            <div className="mt-2 pt-2 border-t border-yellow-700/30">
+                              <div className="font-semibold mb-1">Note:</div>
+                              <div className="text-gray-400 italic">"{overtimeRequests[shift.id].note}"</div>
+                            </div>
+                          )}
+                        </div>
+                        <div className="text-xs text-yellow-500 mt-2 flex items-center space-x-1">
+                          <AlertCircle className="h-3 w-3" />
+                          <span>Clicca su "Rettifica Orari Turno" per modificare la richiesta</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <ShiftActions shift={shift} onUpdate={() => { loadWarehouseData(); loadOvertimeRequests(); }} tableName="warehouse_checkins" />
               </div>
             );
           })}

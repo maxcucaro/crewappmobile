@@ -359,7 +359,7 @@ const MobileCheckIn: React.FC = () => {
         date: new Date().toISOString().split('T')[0],
         start_time: checkInTime,
         tracking_type: 'hours',
-        hourly_rate: 25, // Default
+        hourly_rate: event.tariffa_evento_assegnata || 0, // Usa tariffa assegnata all'evento
         retention_percentage: 15,
         status: 'draft',
         gps_location: {
